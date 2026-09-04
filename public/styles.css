@@ -114,6 +114,19 @@ p,
   white-space: nowrap;
 }
 
+.panel-title {
+  display: grid;
+  gap: 4px;
+  align-items: start;
+}
+
+.queue-stats {
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.2;
+  white-space: nowrap;
+}
+
 .input-grid {
   display: grid;
   grid-template-columns: minmax(0, 1.2fr) minmax(280px, 0.8fr);

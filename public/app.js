@@ -6,6 +6,7 @@ const filesEl = document.querySelector('#files');
 const configMessageEl = document.querySelector('#configMessage');
 const settingsDialog = document.querySelector('#settingsDialog');
 const asrBackendEl = document.querySelector('#asrBackend');
+const jobStatsEl = document.querySelector('#jobStats');
 const analysisPurposeEl = document.querySelector('#analysisPurpose');
 const analysisMessageEl = document.querySelector('#analysisMessage');
 const analysisResultEl = document.querySelector('#analysisResult');
@@ -246,6 +247,7 @@ async function loadHistory() {
 }
 
 function renderJobs() {
+  updateJobStats();
   if (!jobs.length) {
     jobsEl.innerHTML = '<p class="meta">还没有任务。</p>';
     return;
@@ -275,6 +277,17 @@ function renderJobs() {
   for (const button of document.querySelectorAll('[data-copy]')) {
     button.addEventListener('click', () => copyJob(button.dataset.copy));
   }
+}
+
+function updateJobStats() {
+  const total = jobs.length;
+  const done = jobs.filter((job) => job.status === 'done').length;
+  const failed = jobs.filter((job) => job.status === 'failed').length;
+  const active = jobs.filter((job) => ['queued', 'running'].includes(job.status)).length;
+  const parts = [`已完成 ${done}/${total}`];
+  if (active) parts.push(`进行中 ${active}`);
+  if (failed) parts.push(`失败 ${failed}`);
+  if (jobStatsEl) jobStatsEl.textContent = parts.join(' · ');
 }
 
 function logsHtml(job) {
