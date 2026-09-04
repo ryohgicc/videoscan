@@ -1,0 +1,38 @@
+{
+  "manifest_version": 3,
+  "name": "VideoScan Capture",
+  "version": "0.1.0",
+  "description": "Capture Douyin and Xiaohongshu videos into the local VideoScan transcription queue.",
+  "permissions": [
+    "activeTab",
+    "storage"
+  ],
+  "host_permissions": [
+    "http://localhost:3333/*",
+    "http://127.0.0.1:3333/*"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://*.douyin.com/*",
+        "https://*.xiaohongshu.com/*",
+        "https://*.xhslink.com/*",
+        "https://*.xhslink.cn/*",
+        "https://*.rednote.com/*"
+      ],
+      "js": [
+        "content.js"
+      ],
+      "css": [
+        "content.css"
+      ],
+      "run_at": "document_idle"
+    }
+  ],
+  "action": {
+    "default_title": "VideoScan Capture"
+  }
+}

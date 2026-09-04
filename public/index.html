@@ -1,0 +1,219 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>VideoScan</title>
+    <link rel="stylesheet" href="/styles.css">
+  </head>
+  <body>
+    <main class="shell">
+      <section class="workspace">
+        <header class="topbar">
+          <div>
+            <h1>VideoScan</h1>
+            <p>批量链接和音视频转文字</p>
+          </div>
+          <div class="top-actions">
+            <div class="status-strip" id="configStatus">检查环境中...</div>
+            <button id="openSettings" class="secondary">设置</button>
+          </div>
+        </header>
+
+        <nav class="tabs">
+          <button id="tabCurrent" class="tab active" data-tab="current">当前任务</button>
+          <button id="tabHistory" class="tab" data-tab="history">历史记录</button>
+          <button id="tabAnalysis" class="tab" data-tab="analysis">分析结果</button>
+        </nav>
+
+        <section id="currentView" class="tab-view active">
+        <div class="input-grid">
+          <section class="panel">
+            <div class="panel-head">
+              <h2>视频链接</h2>
+              <button id="submitLinks">开始解析</button>
+            </div>
+            <textarea id="links" placeholder="每行一个抖音或小红书分享链接"></textarea>
+          </section>
+
+          <section class="panel">
+            <div class="panel-head">
+              <h2>本地文件</h2>
+              <button id="submitFiles">上传转写</button>
+            </div>
+            <label class="dropzone">
+              <input id="files" type="file" multiple accept="audio/*,video/*">
+              <span>选择音频或视频文件</span>
+            </label>
+          </section>
+        </div>
+
+        <section class="queue">
+          <div class="panel-head">
+            <h2>任务队列</h2>
+            <div class="actions">
+              <button id="exportMarkdown">导出 Markdown</button>
+              <button id="refresh">刷新</button>
+            </div>
+          </div>
+          <div id="jobs" class="jobs"></div>
+        </section>
+        </section>
+
+        <section id="historyView" class="tab-view">
+          <section class="queue">
+            <div class="panel-head">
+              <h2>历史记录</h2>
+              <button id="refreshHistory" class="secondary">刷新</button>
+            </div>
+            <div class="analysis-panel">
+              <label>
+                <span>分析目的</span>
+                <textarea id="analysisPurpose" class="compact-textarea" placeholder="例如：分析这些视频脚本和宣传的利益点，找出可复用的表达套路"></textarea>
+              </label>
+              <div class="actions">
+                <button id="selectAllHistory" type="button" class="secondary">全选当前页</button>
+                <button id="clearHistorySelection" type="button" class="secondary">清空选择</button>
+                <button id="analyzeHistory" type="button">分析选中记录</button>
+              </div>
+              <div id="analysisMessage" class="meta"></div>
+            </div>
+            <div id="history" class="jobs"></div>
+          </section>
+        </section>
+
+        <section id="analysisView" class="tab-view">
+          <section class="queue">
+            <div class="panel-head">
+              <h2>分析结果</h2>
+              <button id="copyAnalysis" class="secondary">复制结果</button>
+            </div>
+            <div id="analysisResult" class="result analysis-result">还没有分析结果。</div>
+          </section>
+        </section>
+      </section>
+    </main>
+    <dialog id="settingsDialog" class="settings-dialog">
+      <form method="dialog" class="dialog-panel">
+        <div class="panel-head">
+          <h2>接入配置</h2>
+          <button id="closeSettings" class="secondary" value="cancel">关闭</button>
+        </div>
+        <div class="settings-sections">
+          <section class="settings-section">
+            <h3>语音识别</h3>
+            <p class="section-hint">当前支持本地 faster-whisper 和火山引擎 ASR API。</p>
+            <div class="settings-grid">
+              <label>
+                <span>语音识别模式</span>
+                <select id="asrBackend">
+                  <option value="faster-whisper">本地 faster-whisper</option>
+                  <option value="volcengine">火山引擎 ASR API</option>
+                </select>
+              </label>
+              <label>
+                <span>本地 Whisper 模型</span>
+                <input id="localWhisperModel" type="text" placeholder="small">
+              </label>
+              <label>
+                <span>火山 API Key</span>
+                <input id="volcengineApiKey" type="password" autocomplete="off" placeholder="********">
+              </label>
+              <label>
+                <span>火山 Resource ID</span>
+                <input id="volcengineResourceId" type="text" placeholder="volc.seedasr.auc">
+              </label>
+              <label>
+                <span>火山请求地址</span>
+                <input id="volcengineAsrBase" type="url" placeholder="https://openspeech.bytedance.com/api/v3/auc/bigmodel">
+              </label>
+            </div>
+            <div class="section-actions">
+              <button id="testAsrApi" type="button" class="secondary">测试语音识别 API</button>
+            </div>
+          </section>
+
+          <section class="settings-section">
+            <h3>摘要与分析</h3>
+            <div class="settings-grid">
+              <label>
+                <span>摘要模型</span>
+                <input id="openaiSummaryModel" type="text" placeholder="gpt-4o-mini">
+              </label>
+              <label>
+                <span>API Key</span>
+                <input id="openaiApiKey" type="password" autocomplete="off" placeholder="********">
+              </label>
+              <label>
+                <span>API 请求地址</span>
+                <input id="openaiApiBase" type="url" placeholder="https://api.openai.com/v1">
+              </label>
+              <label>
+                <span>OpenAI API Key</span>
+                <input id="openaiApiKey" type="password" autocomplete="off" placeholder="********">
+              </label>
+              <label class="inline-field">
+                <input id="enableSummary" type="checkbox">
+                <span>生成摘要</span>
+              </label>
+              <label>
+                <span>历史分析最多条数</span>
+                <input id="historyAnalysisMaxItems" type="number" min="1" max="10" step="1" placeholder="10">
+              </label>
+              <label>
+                <span>单条文字最多字数</span>
+                <input id="historyAnalysisMaxChars" type="number" min="500" max="30000" step="500" placeholder="6000">
+              </label>
+            </div>
+            <div class="section-actions">
+              <button id="testSummaryLlm" type="button" class="secondary">测试摘要 LLM</button>
+            </div>
+          </section>
+
+          <section class="settings-section">
+            <h3>下载与队列</h3>
+            <div class="settings-grid">
+              <label>
+                <span>最大并发任务数</span>
+                <input id="maxConcurrentJobs" type="number" min="1" max="8" step="1" placeholder="2">
+              </label>
+              <label>
+                <span>抖音下载器路径</span>
+                <input id="douyinDownloaderDir" type="text" placeholder="/Users/apple/Documents/douyin-downloader">
+              </label>
+              <label>
+                <span>抖音 Python 路径</span>
+                <input id="douyinPython" type="text" placeholder="/Users/apple/Documents/douyin-downloader/.venv/bin/python">
+              </label>
+              <label>
+                <span>抖音代理</span>
+                <input id="douyinProxy" type="text" placeholder="http://10.0.10.123:8888">
+              </label>
+              <label>
+                <span>小红书下载器路径</span>
+                <input id="xhsDownloaderDir" type="text" placeholder="/Users/apple/Documents/XHS-Downloader">
+              </label>
+              <label>
+                <span>小红书 Python 路径</span>
+                <input id="xhsPython" type="text" placeholder="python3.12">
+              </label>
+              <label class="inline-field">
+                <input id="deleteVideoAfterTranscribe" type="checkbox">
+                <span>转写后删除视频</span>
+              </label>
+              <label class="inline-field">
+                <input id="douyinInsecureTls" type="checkbox">
+                <span>抖音跳过证书校验</span>
+              </label>
+            </div>
+          </section>
+        </div>
+        <div class="dialog-actions">
+          <button id="saveConfig" type="button">保存配置</button>
+        </div>
+        <div id="configMessage" class="meta"></div>
+      </form>
+    </dialog>
+    <script src="/app.js" type="module"></script>
+  </body>
+</html>

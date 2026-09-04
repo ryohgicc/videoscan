@@ -1,0 +1,102 @@
+#videoscan-capture-root {
+  position: fixed;
+  right: 18px;
+  bottom: 92px;
+  z-index: 2147483647;
+  color: #1d2522;
+  font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+}
+
+#videoscan-capture-root * {
+  box-sizing: border-box;
+}
+
+.videoscan-fab {
+  width: 48px;
+  height: 48px;
+  border: 1px solid #176b5b;
+  border-radius: 999px;
+  background: #176b5b;
+  color: white;
+  box-shadow: 0 10px 30px rgb(0 0 0 / 0.24);
+  font-size: 15px;
+  font-weight: 800;
+  cursor: pointer;
+}
+
+.videoscan-panel {
+  position: absolute;
+  right: 0;
+  bottom: 58px;
+  width: min(320px, calc(100vw - 32px));
+  display: grid;
+  gap: 10px;
+  border: 1px solid #d9dfd8;
+  border-radius: 8px;
+  background: #ffffff;
+  padding: 12px;
+  box-shadow: 0 18px 50px rgb(0 0 0 / 0.22);
+}
+
+.videoscan-panel[hidden] {
+  display: none;
+}
+
+.videoscan-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.videoscan-close {
+  width: 26px;
+  height: 26px;
+  border: 1px solid #d9dfd8;
+  border-radius: 6px;
+  background: white;
+  color: #65706c;
+  cursor: pointer;
+}
+
+.videoscan-url,
+.videoscan-status {
+  overflow-wrap: anywhere;
+  color: #65706c;
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.videoscan-url {
+  border: 1px solid #d9dfd8;
+  border-radius: 6px;
+  background: #fbfcfb;
+  padding: 8px;
+}
+
+.videoscan-submit,
+.videoscan-open {
+  min-height: 34px;
+  border-radius: 6px;
+  border: 1px solid #176b5b;
+  padding: 0 12px;
+  font: inherit;
+  font-size: 13px;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.videoscan-submit {
+  background: #176b5b;
+  color: white;
+}
+
+.videoscan-open {
+  background: white;
+  color: #176b5b;
+}
+
+.videoscan-submit:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
