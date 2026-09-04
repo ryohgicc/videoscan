@@ -18,10 +18,12 @@
     {
       "matches": [
         "https://*.douyin.com/*",
+        "https://*.tiktok.com/*",
         "https://*.xiaohongshu.com/*",
         "https://*.xhslink.com/*",
         "https://*.xhslink.cn/*",
-        "https://*.rednote.com/*"
+        "https://*.rednote.com/*",
+        "https://*.instagram.com/*"
       ],
       "js": [
         "content.js"

@@ -725,7 +725,7 @@ function buildVolcengineSubmitBody(audioBytes, audioFormat) {
     request: {
       model_name: 'bigmodel',
       enable_itn: true,
-      enable_punc: false,
+      enable_punc: (process.env.VOLCENGINE_ENABLE_PUNC || 'true') === 'true',
       enable_ddc: false,
       enable_speaker_info: false,
       enable_channel_split: false,
@@ -827,6 +827,7 @@ function getPublicConfig() {
     douyinInsecureTls: (process.env.DOUYIN_INSECURE_TLS || '') === '1',
     volcengineResourceId: process.env.VOLCENGINE_RESOURCE_ID || 'volc.seedasr.auc',
     volcengineAsrBase: process.env.VOLCENGINE_ASR_BASE || 'https://openspeech.bytedance.com/api/v3/auc/bigmodel',
+    volcengineEnablePunc: (process.env.VOLCENGINE_ENABLE_PUNC || 'true') === 'true',
     maskedVolcengineApiKey: maskSecret(process.env.VOLCENGINE_API_KEY || ''),
     xhsDownloaderDir: process.env.XHS_DOWNLOADER_DIR || '',
     xhsPython: process.env.XHS_PYTHON || 'python3',
@@ -855,13 +856,14 @@ function pickConfigUpdates(body) {
     volcengineApiKey: 'VOLCENGINE_API_KEY',
     volcengineResourceId: 'VOLCENGINE_RESOURCE_ID',
     volcengineAsrBase: 'VOLCENGINE_ASR_BASE',
+    volcengineEnablePunc: 'VOLCENGINE_ENABLE_PUNC',
     xhsDownloaderDir: 'XHS_DOWNLOADER_DIR',
     xhsPython: 'XHS_PYTHON',
   };
   const updates = {};
   for (const [inputKey, envKey] of Object.entries(schema)) {
     if (!(inputKey in body)) continue;
-    if (inputKey === 'enableSummary' || inputKey === 'deleteVideoAfterTranscribe') {
+    if (inputKey === 'enableSummary' || inputKey === 'deleteVideoAfterTranscribe' || inputKey === 'volcengineEnablePunc') {
       updates[envKey] = body[inputKey] ? 'true' : 'false';
     } else if (inputKey === 'douyinInsecureTls') {
       updates[envKey] = body[inputKey] ? '1' : '0';

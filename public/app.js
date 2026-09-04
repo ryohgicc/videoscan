@@ -76,6 +76,7 @@ function fillConfigForm(config) {
   document.querySelector('#volcengineApiKey').placeholder = config.maskedVolcengineApiKey || '********';
   document.querySelector('#volcengineResourceId').value = config.volcengineResourceId || 'volc.seedasr.auc';
   document.querySelector('#volcengineAsrBase').value = config.volcengineAsrBase || 'https://openspeech.bytedance.com/api/v3/auc/bigmodel';
+  document.querySelector('#volcengineEnablePunc').checked = config.volcengineEnablePunc !== false;
   document.querySelector('#xhsDownloaderDir').value = config.xhsDownloaderDir || '';
   document.querySelector('#xhsPython').value = config.xhsPython || 'python3';
   document.querySelector('#enableSummary').checked = Boolean(config.enableSummary);
@@ -109,6 +110,7 @@ async function saveConfig(options = {}) {
     douyinInsecureTls: document.querySelector('#douyinInsecureTls').checked,
     volcengineResourceId: document.querySelector('#volcengineResourceId').value,
     volcengineAsrBase: document.querySelector('#volcengineAsrBase').value,
+    volcengineEnablePunc: document.querySelector('#volcengineEnablePunc').checked,
     xhsDownloaderDir: document.querySelector('#xhsDownloaderDir').value,
     xhsPython: document.querySelector('#xhsPython').value,
   };
@@ -140,7 +142,7 @@ async function saveConfig(options = {}) {
 
 function updateAsrModeVisibility() {
   const volcVisible = asrBackendEl.value === 'volcengine';
-  for (const input of ['#volcengineApiKey', '#volcengineResourceId', '#volcengineAsrBase']) {
+  for (const input of ['#volcengineApiKey', '#volcengineResourceId', '#volcengineAsrBase', '#volcengineEnablePunc']) {
     const label = document.querySelector(`${input}`).closest('label');
     if (label) label.style.display = volcVisible ? '' : 'none';
   }
