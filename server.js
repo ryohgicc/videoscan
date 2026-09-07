@@ -216,36 +216,15 @@ app.post('/api/collector/run', async (req, res) => {
       finishedAt: null,
       items: [],
       logs: [],
+      progress: {
+        done: 0,
+        total: keywords.length * platforms.length,
+        label: '准备开始',
+      },
     };
     collectorSessions.set(session.id, session);
     await saveCollectorSession(session);
-
-    const seen = new Set();
-    for (const platform of platforms) {
-      for (const keyword of keywords) {
-        session.logs.push(`[${platform}] 开始关键词：${keyword}`);
-        await saveCollectorSession(session);
-        const attemptItems = await runMediaCrawlerSearch({
-          platform,
-          keyword,
-          limitPerKeyword,
-          retries,
-          session,
-        });
-        for (const item of attemptItems) {
-          const key = item.url || `${item.platform}:${item.title}:${item.author}`;
-          if (seen.has(key)) continue;
-          seen.add(key);
-          session.items.push(item);
-        }
-        session.logs.push(`[${platform}] 关键词完成：${keyword}，累计 ${session.items.length} 条`);
-        await saveCollectorSession(session);
-      }
-    }
-
-    session.status = 'done';
-    session.finishedAt = Date.now();
-    await saveCollectorSession(session);
+    void runCollectorSession(session, { limitPerKeyword, retries });
     res.json({ ok: true, session });
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
@@ -483,6 +462,69 @@ async function runMediaCrawlerSearch({ platform, keyword, limitPerKeyword, retri
   throw lastError instanceof Error ? lastError : new Error(String(lastError || '采集失败'));
 }
 
+async function runCollectorSession(session, options) {
+  const seen = new Set();
+  try {
+    session.status = 'running';
+    session.progress = session.progress || { done: 0, total: session.keywords.length * session.platforms.length, label: '准备开始' };
+    session.logs = session.logs || [];
+    await saveCollectorSession(session);
+
+    let done = 0;
+    for (const platform of session.platforms) {
+      for (const keyword of session.keywords) {
+        session.progress = {
+          done,
+          total: session.progress.total || session.keywords.length * session.platforms.length,
+          label: `${platform === 'dy' ? '抖音' : '小红书'} · ${keyword}`,
+        };
+        addCollectorLog(session, `开始采集：${session.progress.label}`);
+        await saveCollectorSession(session);
+
+        const attemptItems = await runMediaCrawlerSearch({
+          platform,
+          keyword,
+          limitPerKeyword: options.limitPerKeyword,
+          retries: options.retries,
+          session,
+        });
+
+        for (const item of attemptItems) {
+          const key = item.url || `${item.platform}:${item.title}:${item.author}`;
+          if (seen.has(key)) continue;
+          seen.add(key);
+          session.items.push(item);
+        }
+
+        done += 1;
+        session.progress = {
+          done,
+          total: session.progress.total || session.keywords.length * session.platforms.length,
+          label: `${platform === 'dy' ? '抖音' : '小红书'} · ${keyword}`,
+        };
+        addCollectorLog(session, `完成采集：${session.progress.label}，累计 ${session.items.length} 条`);
+        await saveCollectorSession(session);
+      }
+    }
+
+    session.status = 'done';
+    session.finishedAt = Date.now();
+    session.progress = {
+      done: session.progress.total || session.keywords.length * session.platforms.length,
+      total: session.progress.total || session.keywords.length * session.platforms.length,
+      label: '采集完成',
+    };
+    addCollectorLog(session, '采集完成。');
+    await saveCollectorSession(session);
+  } catch (error) {
+    session.status = 'failed';
+    session.finishedAt = Date.now();
+    session.error = error instanceof Error ? error.message : String(error);
+    addCollectorLog(session, `采集失败：${session.error}`);
+    await saveCollectorSession(session);
+  }
+}
+
 async function readCollectorItems(savePath, platform, keyword) {
   const files = await collectJsonlFiles(savePath);
   const items = [];
@@ -561,6 +603,7 @@ function sanitizeFilePart(value) {
 }
 
 async function saveCollectorSession(session) {
+  session.logs = Array.isArray(session.logs) ? session.logs.slice(-200) : [];
   const filePath = path.join(collectorDir, `${session.id}.json`);
   await fsp.writeFile(filePath, `${JSON.stringify(session, null, 2)}\n`, 'utf8');
   await fsp.writeFile(collectorStatePath, `${JSON.stringify({ latestSessionId: session.id }, null, 2)}\n`, 'utf8');
@@ -587,9 +630,17 @@ async function readLatestCollectorSession() {
       if (session) return session;
     }
   } catch {
-    return { id: '', status: 'idle', keywords: [], platforms: [], loginType: 'qrcode', python: 'python3', cookie: '', items: [], logs: [] };
+    return { id: '', status: 'idle', keywords: [], platforms: [], loginType: 'qrcode', python: 'python3', cookie: '', items: [], logs: [], progress: { done: 0, total: 0, label: '' } };
   }
-  return { id: '', status: 'idle', keywords: [], platforms: [], loginType: 'qrcode', python: 'python3', cookie: '', items: [], logs: [] };
+  return { id: '', status: 'idle', keywords: [], platforms: [], loginType: 'qrcode', python: 'python3', cookie: '', items: [], logs: [], progress: { done: 0, total: 0, label: '' } };
+}
+
+function addCollectorLog(session, line) {
+  session.logs = [...(session.logs || []), `[${formatCollectorTime(Date.now())}] ${line}`].slice(-200);
+}
+
+function formatCollectorTime(ts) {
+  return new Date(Number(ts || Date.now())).toLocaleTimeString('zh-CN', { hour12: false });
 }
 
 async function processLinkJob(job, url) {
@@ -1405,20 +1456,20 @@ async function downloadWithXhsTool(job, url, workDir) {
   updateJob(job, { progress: '调用本地小红书下载器' });
   const args = [
     path.join(toolDir, 'main.py'),
-    '-u',
+    '--url',
     url,
-    '-wp',
+    '--work_path',
     workDir,
-    '-fn',
+    '--folder_name',
     '',
-    '-if',
-    'AUTO',
-    '-dr',
+    '--image_format',
+    'WEBP',
+    '--download_record',
     'false',
-    '-l',
+    '--language',
     'zh_CN',
   ];
-  if (process.env.XHS_COOKIE) args.push('-ck', process.env.XHS_COOKIE);
+  if (process.env.XHS_COOKIE) args.push('--cookie', process.env.XHS_COOKIE);
   return runCommand(process.env.XHS_PYTHON || 'python3', args, { cwd: toolDir, job, label: 'xhs' });
 }
 

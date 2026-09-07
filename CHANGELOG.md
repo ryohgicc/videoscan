@@ -1,5 +1,12 @@
 # Changelog
 
+## 2026-09-07
+
+- Added a collector tab for keyword-based Douyin/Xiaohongshu discovery with preview-first selection.
+- Unified collector settings with existing downloader config and added local XHS downloader auto-detection.
+- Wired XHS downloader support into the local download chain and saved XHS cookies in `.env`.
+- Verified end-to-end Douyin transcription and summary flow with local retries.
+
 ## 2026-09-04
 
 - Added browser extension support for TikTok and Instagram pages.
