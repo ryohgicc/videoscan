@@ -12,8 +12,8 @@ VideoScan is a small local web app for batch video/audio transcription. It accep
 - Optional OpenAI summary output.
 - Optional local open-source downloaders for Douyin/Xiaohongshu.
 - Show video metrics from downloader metadata when available.
-- Analyze selected history records with an OpenAI-compatible LLM.
-- Persist analysis results into a separate analysis history, with source record snapshots.
+- Analyze selected `链接→文稿` history records with an OpenAI-compatible LLM.
+- Persist analysis results into a separate `文稿→总结` history, with source record snapshots.
 - Browser extension capture button for Douyin/Xiaohongshu/Instagram/TikTok pages.
 - Export text, SRT, and Markdown.
 - Optionally delete downloaded video files after transcription to save disk space.
@@ -152,7 +152,7 @@ npm run dev
 6. Click the floating `VS` button.
 7. Use `下载并转文字` for the current video, or `获取本页所有视频链接` to scan the page and copy the matched links.
 
-The extension submits the normalized current video URL to the local backend. Completed jobs appear in the normal history tab.
+The extension submits the normalized current video URL to the local backend. Completed jobs appear in the `链接→文稿` history table.
 
 ## Notes
 

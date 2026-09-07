@@ -21,57 +21,19 @@
         </header>
 
         <nav class="tabs">
-          <button id="tabCurrent" class="tab active" data-tab="current">当前任务</button>
-          <button id="tabCollector" class="tab" data-tab="collector">采集</button>
-          <button id="tabHistory" class="tab" data-tab="history">历史记录</button>
-          <button id="tabAnalysis" class="tab" data-tab="analysis">分析结果</button>
+          <button id="tabCollector" class="tab active" data-tab="collector">关键词→链接</button>
+          <button id="tabCurrent" class="tab" data-tab="current">链接→文稿</button>
+          <button id="tabAnalysis" class="tab" data-tab="analysis">文稿→总结</button>
         </nav>
 
-        <section id="currentView" class="tab-view active">
-        <div class="input-grid">
-          <section class="panel">
-            <div class="panel-head">
-              <h2>视频链接</h2>
-              <button id="submitLinks">开始解析</button>
-            </div>
-            <textarea id="links" placeholder="每行一个抖音或小红书分享链接"></textarea>
-          </section>
-
-          <section class="panel">
-            <div class="panel-head">
-              <h2>本地文件</h2>
-              <button id="submitFiles">上传转写</button>
-            </div>
-            <label class="dropzone">
-              <input id="files" type="file" multiple accept="audio/*,video/*">
-              <span>选择音频或视频文件</span>
-            </label>
-          </section>
-        </div>
-
-        <section class="queue">
-          <div class="panel-head">
-            <div class="panel-title">
-              <h2>任务队列</h2>
-              <div id="jobStats" class="queue-stats">已完成 0/0</div>
-            </div>
-            <div class="actions">
-              <button id="exportMarkdown">导出 Markdown</button>
-              <button id="refresh">刷新</button>
-            </div>
-          </div>
-          <div id="jobs" class="jobs"></div>
-          </section>
-        </section>
-
-        <section id="collectorView" class="tab-view">
-          <div class="input-grid">
+        <section id="collectorView" class="tab-view active">
+          <div class="workflow-grid">
             <section class="panel">
               <div class="panel-head">
                 <h2>关键词采集</h2>
                 <button id="startCollector">开始采集</button>
               </div>
-              <p class="section-hint">统一使用设置里的抖音 / 小红书下载配置。</p>
+              <p class="section-hint">先输入关键词，再执行采集生成执行列表。</p>
               <label>
                 <span>关键词</span>
                 <textarea id="collectorKeywords" placeholder="每行一个关键词"></textarea>
@@ -107,16 +69,33 @@
 
             <section class="panel">
               <div class="panel-head">
-                <h2>确认动作</h2>
-                <button id="submitSelectedCollector" class="secondary">确认转写</button>
-              </div>
-              <div class="collector-actions">
+                <h2>执行列表</h2>
                 <button id="refreshCollector" type="button" class="secondary">刷新结果</button>
+              </div>
+              <p class="section-hint">采集完成后，在这里选择要进入 ASR 的视频。</p>
+              <div class="collector-actions">
                 <button id="selectAllCollector" type="button" class="secondary">全选</button>
                 <button id="clearCollectorSelection" type="button" class="secondary">清空</button>
+                <button id="submitSelectedCollector" type="button">确认转写</button>
                 <button id="exportCollector" type="button" class="secondary">导出 CSV</button>
               </div>
-              <p class="section-hint">先看采集结果，再勾选要转写的链接。</p>
+              <div id="collectorStats" class="queue-stats">还没有结果。</div>
+              <div class="table-wrap">
+                <table class="data-table">
+                  <thead>
+                    <tr>
+                      <th>选中</th>
+                      <th>平台</th>
+                      <th>标题</th>
+                      <th>作者</th>
+                      <th>指标</th>
+                      <th>关键词</th>
+                      <th>链接</th>
+                    </tr>
+                  </thead>
+                  <tbody id="collectorTable"></tbody>
+                </table>
+              </div>
             </section>
           </div>
 
@@ -134,45 +113,74 @@
           <section class="queue">
             <div class="panel-head">
               <div class="panel-title">
-                <h2>采集结果</h2>
-                <div id="collectorStats" class="queue-stats">还没有结果。</div>
+                <h2>采集历史</h2>
+                <div id="collectorHistoryCount" class="queue-stats">还没有采集历史。</div>
               </div>
             </div>
-            <div class="table-wrap">
-              <table class="data-table">
-                <thead>
-                  <tr>
-                    <th>选中</th>
-                    <th>平台</th>
-                    <th>标题</th>
-                    <th>作者</th>
-                    <th>指标</th>
-                    <th>关键词</th>
-                    <th>链接</th>
-                  </tr>
-                </thead>
-                <tbody id="collectorTable"></tbody>
-              </table>
-            </div>
+            <div id="collectorHistory" class="history-grid"></div>
           </section>
         </section>
 
-        <section id="historyView" class="tab-view">
+        <section id="currentView" class="tab-view">
+          <div class="input-grid">
+            <section class="panel">
+              <div class="panel-head">
+                <h2>链接→文稿</h2>
+                <button id="submitLinks">开始解析</button>
+              </div>
+              <textarea id="links" placeholder="每行一个抖音或小红书分享链接"></textarea>
+            </section>
+
+            <section class="panel">
+              <div class="panel-head">
+                <h2>本地文件</h2>
+                <button id="submitFiles">上传转写</button>
+              </div>
+              <label class="dropzone">
+                <input id="files" type="file" multiple accept="audio/*,video/*">
+                <span>选择音频或视频文件</span>
+              </label>
+            </section>
+          </div>
+
           <section class="queue">
             <div class="panel-head">
-              <h2>历史记录</h2>
-              <button id="refreshHistory" class="secondary">刷新</button>
+              <div class="panel-title">
+                <h2>任务队列</h2>
+                <div id="jobStats" class="queue-stats">已完成 0/0</div>
+              </div>
+              <div class="actions">
+                <button id="exportMarkdown">导出 Markdown</button>
+                <button id="refresh">刷新</button>
+              </div>
+            </div>
+            <div id="jobs" class="jobs"></div>
+          </section>
+
+          <section class="queue">
+            <div class="panel-head">
+              <div class="panel-title">
+                <h2>链接历史</h2>
+                <div id="currentHistoryCount" class="queue-stats">还没有历史记录。</div>
+              </div>
+              <div class="history-toolbar">
+                <label class="history-filter">
+                  <span>关键词筛选</span>
+                  <input id="historyKeywordFilter" type="text" placeholder="按关键词过滤历史记录">
+                </label>
+                <div class="actions">
+                  <button id="selectAllHistory" type="button" class="secondary">全选当前页</button>
+                  <button id="clearHistorySelection" type="button" class="secondary">清空选择</button>
+                  <button id="clearHistoryFilter" type="button" class="secondary">清除筛选</button>
+                  <button id="analyzeHistory" type="button">分析选中记录</button>
+                </div>
+              </div>
             </div>
             <div class="analysis-panel">
               <label>
                 <span>分析目的</span>
                 <textarea id="analysisPurpose" class="compact-textarea" placeholder="例如：分析这些视频脚本和宣传的利益点，找出可复用的表达套路"></textarea>
               </label>
-              <div class="actions">
-                <button id="selectAllHistory" type="button" class="secondary">全选当前页</button>
-                <button id="clearHistorySelection" type="button" class="secondary">清空选择</button>
-                <button id="analyzeHistory" type="button">分析选中记录</button>
-              </div>
               <div id="analysisMessage" class="meta"></div>
             </div>
             <div id="history" class="jobs"></div>

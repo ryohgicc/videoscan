@@ -19,6 +19,7 @@ const publicDir = path.join(rootDir, 'public');
 const envPath = path.join(rootDir, '.env');
 const historyPath = path.join(dataDir, 'history.jsonl');
 const analysisHistoryPath = path.join(dataDir, 'analysis-history.jsonl');
+const collectorHistoryPath = path.join(dataDir, 'collector-history.jsonl');
 const collectorDir = path.join(dataDir, 'collector');
 const collectorStatePath = path.join(collectorDir, 'latest-session.json');
 const mediaCrawlerDir = path.join(rootDir, 'MediaCrawler');
@@ -193,6 +194,22 @@ app.get('/api/collector/session', async (_req, res) => {
   res.json({ session });
 });
 
+app.get('/api/collector/session/:sessionId', async (req, res) => {
+  const session = await readCollectorSession(req.params.sessionId);
+  if (!session) return res.status(404).json({ ok: false, error: 'collector_session_not_found' });
+  res.json({ session });
+});
+
+app.get('/api/collector/history', async (_req, res) => {
+  res.json({ history: await readCollectorHistory() });
+});
+
+app.delete('/api/collector/history/:sessionId', async (req, res) => {
+  const result = await deleteCollectorHistoryEntry(req.params.sessionId);
+  if (!result.deleted) return res.status(404).json({ ok: false, error: 'collector_history_not_found' });
+  res.json({ ok: true, deleted: result.deleted, history: result.history });
+});
+
 app.post('/api/collector/run', async (req, res) => {
   try {
     const keywords = normalizeLines(req.body?.keywords);
@@ -246,8 +263,9 @@ app.post('/api/collector/submit', async (req, res) => {
         type: 'collector',
         source: item.url,
         originalName: item.title ? `${item.title} · ${item.author || ''}`.trim() : item.url,
+        sourceKeywords: item.keywords || [],
       });
-      enqueueJob(job, () => processLinkJob(job, item.url));
+      enqueueJob(job, () => processLinkJob(job, item.url, { sourceKeywords: item.keywords || [] }));
       return job;
     });
 
@@ -516,12 +534,14 @@ async function runCollectorSession(session, options) {
     };
     addCollectorLog(session, '采集完成。');
     await saveCollectorSession(session);
+    await appendCollectorHistory(session);
   } catch (error) {
     session.status = 'failed';
     session.finishedAt = Date.now();
     session.error = error instanceof Error ? error.message : String(error);
     addCollectorLog(session, `采集失败：${session.error}`);
     await saveCollectorSession(session);
+    await appendCollectorHistory(session);
   }
 }
 
@@ -635,6 +655,39 @@ async function readLatestCollectorSession() {
   return { id: '', status: 'idle', keywords: [], platforms: [], loginType: 'qrcode', python: 'python3', cookie: '', items: [], logs: [], progress: { done: 0, total: 0, label: '' } };
 }
 
+async function readCollectorHistory() {
+  let content = '';
+  try {
+    content = await fsp.readFile(collectorHistoryPath, 'utf8');
+  } catch (error) {
+    if (error.code === 'ENOENT') return [];
+    throw error;
+  }
+  return content
+    .split(/\r?\n/)
+    .filter(Boolean)
+    .map((line) => {
+      try {
+        return JSON.parse(line);
+      } catch {
+        return null;
+      }
+    })
+    .filter(Boolean)
+    .sort((a, b) => (b.savedAt || b.finishedAt || 0) - (a.savedAt || a.finishedAt || 0));
+}
+
+async function deleteCollectorHistoryEntry(sessionId) {
+  const history = await readCollectorHistory();
+  const next = history.filter((item) => item.sessionId !== sessionId);
+  const deleted = history.length - next.length;
+  if (!deleted) return { deleted: 0, history };
+  await writeCollectorHistory(next);
+  await fsp.unlink(path.join(collectorDir, `${sessionId}.json`)).catch(() => {});
+  collectorSessions.delete(sessionId);
+  return { deleted, history: next };
+}
+
 function addCollectorLog(session, line) {
   session.logs = [...(session.logs || []), `[${formatCollectorTime(Date.now())}] ${line}`].slice(-200);
 }
@@ -643,7 +696,7 @@ function formatCollectorTime(ts) {
   return new Date(Number(ts || Date.now())).toLocaleTimeString('zh-CN', { hour12: false });
 }
 
-async function processLinkJob(job, url) {
+async function processLinkJob(job, url, jobMeta = {}) {
   url = normalizeInputUrl(url);
   updateJob(job, { source: url, originalName: url });
   addJobLog(job, `解析链接：${url}`);
@@ -667,7 +720,7 @@ async function processLinkJob(job, url) {
     meta = { title: resolved.title, author: resolved.author };
   }
 
-  await processMedia(job, videoPath, workDir, { ...meta, videoPath });
+  await processMedia(job, videoPath, workDir, { ...jobMeta, videoPath });
 }
 
 async function processFileJob(job, filePath, originalName) {
@@ -725,6 +778,7 @@ async function processMedia(job, mediaPath, workDir, meta = {}) {
     jobId: job.id,
     source: job.source,
     originalName: job.originalName,
+    sourceKeywords: meta.sourceKeywords || job.sourceKeywords || [],
     title,
     metrics: meta.metrics || {},
     transcript: transcript.text,
@@ -1349,6 +1403,24 @@ async function readAnalysisHistory() {
     .sort((a, b) => (b.createdAt || b.savedAt || 0) - (a.createdAt || a.savedAt || 0));
 }
 
+async function appendCollectorHistory(session) {
+  const payload = {
+    sessionId: session.id,
+    status: session.status,
+    keywords: session.keywords || [],
+    platforms: session.platforms || [],
+    limitPerKeyword: session.limitPerKeyword || 20,
+    retries: session.retries ?? 2,
+    itemCount: Array.isArray(session.items) ? session.items.length : 0,
+    createdAt: session.createdAt || Date.now(),
+    finishedAt: session.finishedAt || Date.now(),
+    savedAt: Date.now(),
+  };
+  const history = await readCollectorHistory();
+  const next = [payload, ...history.filter((item) => item.sessionId !== payload.sessionId)];
+  await writeCollectorHistory(next);
+}
+
 async function writeHistory(items) {
   const content = items.map((item) => JSON.stringify(item)).join('\n');
   await fsp.writeFile(historyPath, content ? `${content}\n` : '', 'utf8');
@@ -1366,6 +1438,11 @@ async function deleteHistoryEntry(jobId) {
 async function writeAnalysisHistory(items) {
   const content = items.map((item) => JSON.stringify(item)).join('\n');
   await fsp.writeFile(analysisHistoryPath, content ? `${content}\n` : '', 'utf8');
+}
+
+async function writeCollectorHistory(items) {
+  const content = items.map((item) => JSON.stringify(item)).join('\n');
+  await fsp.writeFile(collectorHistoryPath, content ? `${content}\n` : '', 'utf8');
 }
 
 async function deleteAnalysisHistoryEntry(analysisId) {

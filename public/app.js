@@ -24,15 +24,18 @@ const collectorProgressTextEl = document.querySelector('#collectorProgressText')
 const collectorProgressDetailEl = document.querySelector('#collectorProgressDetail');
 const collectorLogsEl = document.querySelector('#collectorLogs');
 const collectorLogStatsEl = document.querySelector('#collectorLogStats');
+const collectorHistoryEl = document.querySelector('#collectorHistory');
+const collectorHistoryCountEl = document.querySelector('#collectorHistoryCount');
+const historyKeywordFilterEl = document.querySelector('#historyKeywordFilter');
 let currentConfig = {};
 
 document.querySelector('#submitLinks').addEventListener('click', submitLinks);
 document.querySelector('#submitFiles').addEventListener('click', submitFiles);
 document.querySelector('#refresh').addEventListener('click', loadJobs);
 document.querySelector('#exportMarkdown').addEventListener('click', exportMarkdown);
-document.querySelector('#refreshHistory').addEventListener('click', loadHistory);
 document.querySelector('#selectAllHistory').addEventListener('click', selectAllHistory);
 document.querySelector('#clearHistorySelection').addEventListener('click', clearHistorySelection);
+document.querySelector('#clearHistoryFilter').addEventListener('click', clearHistoryFilter);
 document.querySelector('#analyzeHistory').addEventListener('click', analyzeSelectedHistory);
 document.querySelector('#copyAnalysis').addEventListener('click', copyAnalysis);
 document.querySelector('#openSettings').addEventListener('click', openSettings);
@@ -49,7 +52,9 @@ document.querySelector('#exportCollector').addEventListener('click', exportColle
 
 let jobs = [];
 let historyItems = [];
+let historyKeywordFilter = '';
 let analysisHistoryItems = [];
+let collectorHistoryItems = [];
 let selectedHistoryIds = new Set();
 let lastAnalysisText = '';
 let lastAnalysisId = '';
@@ -64,6 +69,7 @@ await loadJobs();
 await loadHistory();
 await loadAnalysisHistory();
 await loadCollectorSession();
+await loadCollectorHistory();
 switchTab(location.hash.replace('#', '') || 'current');
 startPolling();
 
@@ -73,6 +79,10 @@ for (const tab of document.querySelectorAll('.tab')) {
 
 window.addEventListener('hashchange', () => switchTab(location.hash.replace('#', '') || 'current'));
 asrBackendEl.addEventListener('change', updateAsrModeVisibility);
+historyKeywordFilterEl.addEventListener('input', () => {
+  historyKeywordFilter = historyKeywordFilterEl.value.trim();
+  renderHistory();
+});
 
 async function loadConfig() {
   const response = await fetch('/api/config');
@@ -323,6 +333,7 @@ async function startCollector() {
   collectorStatusEl.textContent = '采集已开始，正在后台运行...';
   startCollectorPolling();
   await loadCollectorSession();
+  await loadCollectorHistory();
 }
 
 function renderCollectorTable() {
@@ -516,7 +527,33 @@ async function loadHistory() {
   const payload = await response.json();
   historyItems = payload.history || [];
   selectedHistoryIds = new Set([...selectedHistoryIds].filter((id) => historyItems.some((item) => item.jobId === id)));
+  const countEl = document.querySelector('#currentHistoryCount');
+  if (countEl) countEl.textContent = historyItems.length ? `共 ${historyItems.length} 条` : '还没有历史记录。';
   renderHistory();
+}
+
+function getFilteredHistoryItems() {
+  const filter = historyKeywordFilter.trim().toLowerCase();
+  if (!filter) return historyItems;
+  return historyItems.filter((item) => {
+    const keywords = [
+      ...(item.sourceKeywords || []),
+      item.keyword || '',
+      item.title || '',
+      item.source || '',
+    ].map((value) => String(value || '').toLowerCase());
+    return keywords.some((value) => value.includes(filter));
+  });
+}
+
+async function loadCollectorHistory() {
+  const response = await fetch('/api/collector/history');
+  const payload = await response.json();
+  collectorHistoryItems = payload.history || [];
+  if (collectorHistoryCountEl) {
+    collectorHistoryCountEl.textContent = collectorHistoryItems.length ? `共 ${collectorHistoryItems.length} 条` : '还没有采集历史。';
+  }
+  renderCollectorHistory();
 }
 
 async function loadAnalysisHistory() {
@@ -585,32 +622,65 @@ function logsHtml(job) {
 }
 
 function renderHistory() {
+  const visibleItems = getFilteredHistoryItems();
   if (!historyItems.length) {
     historyEl.innerHTML = '<p class="meta">还没有历史记录。</p>';
+    updateHistoryCount(0, 0);
+    updateAnalysisMessage();
+    return;
+  }
+  if (!visibleItems.length) {
+    historyEl.innerHTML = '<p class="meta">没有匹配的历史记录。</p>';
+    updateHistoryCount(0, historyItems.length);
+    updateAnalysisMessage();
     return;
   }
 
-  historyEl.innerHTML = historyItems.map((item) => `
-    <article class="job">
-      <div class="job-head">
-        <label class="history-select">
-          <input type="checkbox" data-history-select="${escapeAttribute(item.jobId)}" ${selectedHistoryIds.has(item.jobId) ? 'checked' : ''}>
-          <span>
-            <span class="source">${escapeHtml(item.title || item.source || item.jobId)}</span>
-            <span class="meta">${escapeHtml(item.source || '')} · ${formatDuration(item.durationMs || 0)}${transcriptCountMeta(item.transcript)}</span>
-          </span>
-        </label>
-        <span class="badge done">历史</span>
-      </div>
-      ${metricsHtml(item.metrics)}
-      <div class="result-label">音频原文</div>
-      <div class="result transcript-result">${escapeHtml(item.transcript || '')}</div>
-      <div class="job-actions">
-        <button class="secondary" data-history-copy="${escapeAttribute(item.jobId)}">复制原文</button>
-        <button class="secondary danger" data-history-delete="${escapeAttribute(item.jobId)}">删除</button>
-      </div>
-    </article>
-  `).join('');
+  historyEl.innerHTML = `
+    <table class="data-table">
+      <thead>
+        <tr>
+          <th>选中</th>
+          <th>标题</th>
+          <th>来源</th>
+          <th>关键词</th>
+          <th>指标</th>
+          <th>时长</th>
+          <th>文字稿</th>
+          <th>操作</th>
+        </tr>
+      </thead>
+      <tbody>
+        ${visibleItems.map((item) => `
+          <tr>
+            <td>
+              <input type="checkbox" data-history-select="${escapeAttribute(item.jobId)}" ${selectedHistoryIds.has(item.jobId) ? 'checked' : ''}>
+            </td>
+            <td>
+              <div class="table-title">${escapeHtml(item.title || item.source || item.jobId)}</div>
+            </td>
+            <td>
+              <div class="table-subtitle">${escapeHtml(item.source || '')}</div>
+            </td>
+            <td>
+              <div class="table-subtitle">${escapeHtml((item.sourceKeywords || []).join(' / ') || item.keyword || '无')}</div>
+            </td>
+            <td>${escapeHtml(formatHistoryMetrics(item.metrics))}</td>
+            <td>${escapeHtml(formatDuration(item.durationMs || 0))}</td>
+            <td>
+              <div class="table-subtitle">${escapeHtml(truncateText(item.transcript || '', 120) || '无文字稿')}</div>
+            </td>
+            <td>
+              <div class="job-actions">
+                <button class="secondary" data-history-copy="${escapeAttribute(item.jobId)}">复制</button>
+                <button class="secondary danger" data-history-delete="${escapeAttribute(item.jobId)}">删除</button>
+              </div>
+            </td>
+          </tr>
+        `).join('')}
+      </tbody>
+    </table>
+  `;
 
   for (const button of document.querySelectorAll('[data-history-copy]')) {
     button.addEventListener('click', () => copyHistory(button.dataset.historyCopy));
@@ -626,6 +696,24 @@ function renderHistory() {
     });
   }
   updateAnalysisMessage();
+  updateHistoryCount(visibleItems.length, historyItems.length);
+}
+
+function formatHistoryMetrics(metrics = {}) {
+  const parts = [
+    ['播', metrics.playCount],
+    ['赞', metrics.likeCount],
+    ['评', metrics.commentCount],
+    ['藏', metrics.collectCount],
+    ['转', metrics.shareCount],
+  ].filter(([, value]) => value !== null && value !== undefined && value !== '');
+  return parts.map(([label, value]) => `${label}${formatNumber(value)}`).join(' ');
+}
+
+function truncateText(text, maxChars) {
+  const value = String(text || '').trim();
+  if (!value) return '';
+  return value.length > maxChars ? `${value.slice(0, maxChars)}...` : value;
 }
 
 async function copyHistory(jobId) {
@@ -670,13 +758,31 @@ async function deleteAnalysisHistory(analysisId) {
 
 function selectAllHistory() {
   const max = Number(document.querySelector('#historyAnalysisMaxItems').value || 10);
-  selectedHistoryIds = new Set(historyItems.slice(0, max).map((item) => item.jobId));
+  selectedHistoryIds = new Set(getFilteredHistoryItems().slice(0, max).map((item) => item.jobId));
   renderHistory();
 }
 
 function clearHistorySelection() {
   selectedHistoryIds = new Set();
   renderHistory();
+}
+
+function clearHistoryFilter() {
+  historyKeywordFilter = '';
+  if (historyKeywordFilterEl) historyKeywordFilterEl.value = '';
+  renderHistory();
+}
+
+function updateHistoryCount(visibleCount, totalCount) {
+  const countEl = document.querySelector('#currentHistoryCount');
+  if (!countEl) return;
+  if (!totalCount) {
+    countEl.textContent = '还没有历史记录。';
+    return;
+  }
+  countEl.textContent = visibleCount === totalCount
+    ? `共 ${totalCount} 条`
+    : `共 ${visibleCount}/${totalCount} 条`;
 }
 
 function updateAnalysisMessage(message = '') {
@@ -762,6 +868,58 @@ function renderAnalysisHistory() {
   }
 }
 
+function renderCollectorHistory() {
+  if (!collectorHistoryEl) return;
+  if (!collectorHistoryItems.length) {
+    collectorHistoryEl.innerHTML = '<p class="meta">还没有采集历史。</p>';
+    return;
+  }
+  collectorHistoryEl.innerHTML = collectorHistoryItems.map((item) => `
+    <article class="job">
+      <div class="job-head">
+        <div>
+          <div class="source">${escapeHtml((item.keywords || []).join(' / ') || item.sessionId)}</div>
+          <div class="meta">${escapeHtml((item.platforms || []).join('、'))} · ${escapeHtml(item.status || '')} · ${formatDateTime(item.finishedAt || item.savedAt || item.createdAt)}</div>
+        </div>
+        <span class="badge done">采集</span>
+      </div>
+      <div class="meta">结果 ${escapeHtml(String(item.itemCount || 0))} 条</div>
+      <div class="job-actions">
+        <button class="secondary" data-collector-history-load="${escapeAttribute(item.sessionId)}">查看</button>
+        <button class="secondary danger" data-collector-history-delete="${escapeAttribute(item.sessionId)}">删除</button>
+      </div>
+    </article>
+  `).join('');
+
+  for (const button of document.querySelectorAll('[data-collector-history-load]')) {
+    button.addEventListener('click', () => loadCollectorHistoryEntry(button.dataset.collectorHistoryLoad));
+  }
+  for (const button of document.querySelectorAll('[data-collector-history-delete]')) {
+    button.addEventListener('click', () => deleteCollectorHistory(button.dataset.collectorHistoryDelete));
+  }
+}
+
+async function loadCollectorHistoryEntry(sessionId) {
+  const response = await fetch(`/api/collector/session/${encodeURIComponent(sessionId)}`);
+  const payload = await response.json().catch(() => ({}));
+  if (!response.ok || !payload.session) return;
+  collectorSessionId = payload.session.id || '';
+  collectorItems = payload.session.items || [];
+  selectedCollectorIds = new Set(collectorItems.filter((item) => item.selected !== false).map((item) => item.id));
+  fillCollectorControls(payload.session);
+  renderCollectorTable();
+  renderCollectorProgress(payload.session);
+  renderCollectorLogs(payload.session);
+  switchTab('collector');
+}
+
+async function deleteCollectorHistory(sessionId) {
+  if (!window.confirm('删除这条采集历史？')) return;
+  const response = await fetch(`/api/collector/history/${encodeURIComponent(sessionId)}`, { method: 'DELETE' });
+  if (!response.ok) return;
+  await loadCollectorHistory();
+}
+
 function formatAnalysisMeta(item) {
   const count = item.usedItems || (item.sourceHistory || []).length || 0;
   const when = formatDateTime(item.createdAt || item.savedAt || Date.now());
@@ -784,16 +942,14 @@ function loadAnalysisResult(analysisId) {
 }
 
 function switchTab(name) {
-  if (!['current', 'collector', 'history', 'analysis'].includes(name)) name = 'current';
+  if (!['current', 'collector', 'analysis'].includes(name)) name = 'collector';
   for (const tab of document.querySelectorAll('.tab')) {
     tab.classList.toggle('active', tab.dataset.tab === name);
   }
   document.querySelector('#currentView').classList.toggle('active', name === 'current');
   document.querySelector('#collectorView').classList.toggle('active', name === 'collector');
-  document.querySelector('#historyView').classList.toggle('active', name === 'history');
   document.querySelector('#analysisView').classList.toggle('active', name === 'analysis');
   if (name === 'collector') loadCollectorSession();
-  if (name === 'history') loadHistory();
   if (location.hash !== `#${name}`) {
     history.replaceState(null, '', `#${name}`);
   }
