@@ -18,12 +18,19 @@ const uploadDir = path.join(rootDir, 'uploads');
 const publicDir = path.join(rootDir, 'public');
 const envPath = path.join(rootDir, '.env');
 const historyPath = path.join(dataDir, 'history.jsonl');
+const analysisHistoryPath = path.join(dataDir, 'analysis-history.jsonl');
+const collectorDir = path.join(dataDir, 'collector');
+const collectorStatePath = path.join(collectorDir, 'latest-session.json');
+const mediaCrawlerDir = path.join(rootDir, 'MediaCrawler');
+const xhsDownloaderFallbackDir = path.join(rootDir, 'XHS-Downloader');
 const jobs = new Map();
 const pendingJobs = [];
+const collectorSessions = new Map();
 let activeJobCount = 0;
 
 await fsp.mkdir(dataDir, { recursive: true });
 await fsp.mkdir(uploadDir, { recursive: true });
+await fsp.mkdir(collectorDir, { recursive: true });
 
 const upload = multer({
   dest: uploadDir,
@@ -107,10 +114,20 @@ app.get('/api/history', async (_req, res) => {
   res.json({ history: await readHistory() });
 });
 
+app.get('/api/history/analysis', async (_req, res) => {
+  res.json({ analyses: await readAnalysisHistory() });
+});
+
 app.delete('/api/history/:jobId', async (req, res) => {
   const result = await deleteHistoryEntry(req.params.jobId);
   if (!result.deleted) return res.status(404).json({ ok: false, error: 'history_not_found' });
   res.json({ ok: true, deleted: result.deleted, history: result.history });
+});
+
+app.delete('/api/history/analysis/:analysisId', async (req, res) => {
+  const result = await deleteAnalysisHistoryEntry(req.params.analysisId);
+  if (!result.deleted) return res.status(404).json({ ok: false, error: 'analysis_history_not_found' });
+  res.json({ ok: true, deleted: result.deleted, analyses: result.analyses });
 });
 
 app.post('/api/extension/capture', (req, res) => {
@@ -153,9 +170,134 @@ app.post('/api/history/analyze', async (req, res) => {
     if (!selected.length) return res.status(404).json({ ok: false, error: '没有找到选中的历史记录。' });
 
     const analysis = await analyzeHistoryRecords(purpose, selected, { maxChars });
-    res.json({ ok: true, analysis, usedItems: selected.length, maxItems, maxChars });
+    const analysisEntry = {
+      analysisId: crypto.randomUUID(),
+      purpose,
+      analysis,
+      usedItems: selected.length,
+      maxItems,
+      maxChars,
+      sourceJobIds: selected.map((item) => item.jobId),
+      sourceHistory: selected.map((item) => cloneHistoryRecord(item)),
+      createdAt: Date.now(),
+    };
+    await appendAnalysisHistory(analysisEntry);
+    res.json({ ok: true, analysis, analysisEntry, usedItems: selected.length, maxItems, maxChars });
   } catch (error) {
     res.status(400).json({ ok: false, error: error instanceof Error ? error.message : String(error) });
+  }
+});
+
+app.get('/api/collector/session', async (_req, res) => {
+  const session = await readLatestCollectorSession();
+  res.json({ session });
+});
+
+app.post('/api/collector/run', async (req, res) => {
+  try {
+    const keywords = normalizeLines(req.body?.keywords);
+    const platforms = normalizeLines(req.body?.platforms).filter((item) => ['dy', 'xhs'].includes(item));
+    const limitPerKeyword = clampNumber(req.body?.limitPerKeyword, 20, 1, 100);
+    const retries = clampNumber(req.body?.retries, 2, 0, 5);
+    if (!keywords.length) return res.status(400).json({ ok: false, error: '请先输入关键词。' });
+    if (!platforms.length) return res.status(400).json({ ok: false, error: '请至少选择一个平台。' });
+    if (!await directoryExists(mediaCrawlerDir)) {
+      return res.status(400).json({ ok: false, error: '未找到本地 MediaCrawler 目录。请先克隆到项目根目录。' });
+    }
+
+    const session = {
+      id: crypto.randomUUID(),
+      status: 'running',
+      keywords,
+      platforms,
+      limitPerKeyword,
+      retries,
+      createdAt: Date.now(),
+      finishedAt: null,
+      items: [],
+      logs: [],
+    };
+    collectorSessions.set(session.id, session);
+    await saveCollectorSession(session);
+
+    const seen = new Set();
+    for (const platform of platforms) {
+      for (const keyword of keywords) {
+        session.logs.push(`[${platform}] 开始关键词：${keyword}`);
+        await saveCollectorSession(session);
+        const attemptItems = await runMediaCrawlerSearch({
+          platform,
+          keyword,
+          limitPerKeyword,
+          retries,
+          session,
+        });
+        for (const item of attemptItems) {
+          const key = item.url || `${item.platform}:${item.title}:${item.author}`;
+          if (seen.has(key)) continue;
+          seen.add(key);
+          session.items.push(item);
+        }
+        session.logs.push(`[${platform}] 关键词完成：${keyword}，累计 ${session.items.length} 条`);
+        await saveCollectorSession(session);
+      }
+    }
+
+    session.status = 'done';
+    session.finishedAt = Date.now();
+    await saveCollectorSession(session);
+    res.json({ ok: true, session });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    res.status(400).json({ ok: false, error: message });
+  }
+});
+
+app.post('/api/collector/submit', async (req, res) => {
+  try {
+    const sessionId = String(req.body?.sessionId || '').trim();
+    const ids = Array.isArray(req.body?.ids) ? req.body.ids.map(String) : [];
+    const session = await readCollectorSession(sessionId);
+    if (!session) return res.status(404).json({ ok: false, error: 'collector_session_not_found' });
+    const items = session.items.filter((item) => ids.includes(item.id));
+    if (!items.length) return res.status(400).json({ ok: false, error: 'no_selected_items' });
+
+    const created = items.map((item) => {
+      const job = createJob({
+        type: 'collector',
+        source: item.url,
+        originalName: item.title ? `${item.title} · ${item.author || ''}`.trim() : item.url,
+      });
+      enqueueJob(job, () => processLinkJob(job, item.url));
+      return job;
+    });
+
+    session.logs.push(`已提交 ${created.length} 条到转写队列`);
+    await saveCollectorSession(session);
+    res.json({ ok: true, jobs: created });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    res.status(400).json({ ok: false, error: message });
+  }
+});
+
+app.post('/api/collector/selection', async (req, res) => {
+  try {
+    const sessionId = String(req.body?.sessionId || '').trim();
+    const ids = Array.isArray(req.body?.ids) ? req.body.ids.map(String) : [];
+    const session = await readCollectorSession(sessionId);
+    if (!session) return res.status(404).json({ ok: false, error: 'collector_session_not_found' });
+
+    const selected = new Set(ids);
+    session.items = session.items.map((item) => ({
+      ...item,
+      selected: selected.has(item.id),
+    }));
+    await saveCollectorSession(session);
+    res.json({ ok: true, session });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    res.status(400).json({ ok: false, error: message });
   }
 });
 
@@ -265,6 +407,189 @@ function getHistoryAnalysisMaxChars() {
   const value = Number(process.env.HISTORY_ANALYSIS_MAX_CHARS || 6000);
   if (!Number.isFinite(value)) return 6000;
   return Math.min(30000, Math.max(500, Math.floor(value)));
+}
+
+function clampNumber(value, fallback, min, max) {
+  const number = Number(value);
+  if (!Number.isFinite(number)) return fallback;
+  return Math.min(max, Math.max(min, Math.floor(number)));
+}
+
+function normalizeLines(value) {
+  if (Array.isArray(value)) return [...new Set(value.map((item) => String(item).trim()).filter(Boolean))];
+  return [...new Set(String(value || '').split(/\n+/).map((line) => line.trim()).filter(Boolean))];
+}
+
+async function directoryExists(dirPath) {
+  try {
+    const stat = await fsp.stat(dirPath);
+    return stat.isDirectory();
+  } catch {
+    return false;
+  }
+}
+
+async function runMediaCrawlerSearch({ platform, keyword, limitPerKeyword, retries, session }) {
+  const attempts = Math.max(1, retries + 1);
+  const savePath = path.join(collectorDir, session.id, platform, sanitizeFilePart(keyword));
+  await fsp.mkdir(savePath, { recursive: true });
+  const python = process.env.XHS_PYTHON || process.env.MEDIA_CRAWLER_PYTHON || 'python3';
+  const cookie = process.env.XHS_COOKIE || '';
+  const proxy = process.env.DOUYIN_PROXY || '';
+  const loginType = cookie ? 'cookie' : 'qrcode';
+
+  let lastError = null;
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    try {
+      session.logs.push(`[${platform}] ${keyword} 第 ${attempt} 次采集`);
+      await saveCollectorSession(session);
+      await runCommand(python, [
+        'main.py',
+        '--platform',
+        platform,
+        '--lt',
+        loginType,
+        '--type',
+        'search',
+        '--save_data_option',
+        'jsonl',
+        '--save_data_path',
+        savePath,
+        '--get_comment',
+        'false',
+        '--get_sub_comment',
+        'false',
+        '--crawler_max_notes_count',
+        String(limitPerKeyword),
+        '--keywords',
+        keyword,
+        '--headless',
+        'false',
+        ...(cookie ? ['--cookies', cookie] : []),
+        ...(proxy ? ['--enable_ip_proxy', 'true', '--ip_proxy_provider_name', 'static', '--static_proxy_url', proxy] : []),
+      ], {
+        cwd: mediaCrawlerDir,
+        session,
+        label: `crawler-${platform}-${attempt}`,
+        timeoutMs: 1000 * 60 * 20,
+      });
+      return await readCollectorItems(savePath, platform, keyword);
+    } catch (error) {
+      lastError = error;
+      session.logs.push(`[${platform}] ${keyword} 第 ${attempt} 次失败：${error instanceof Error ? error.message : String(error)}`);
+      await saveCollectorSession(session);
+    }
+  }
+  throw lastError instanceof Error ? lastError : new Error(String(lastError || '采集失败'));
+}
+
+async function readCollectorItems(savePath, platform, keyword) {
+  const files = await collectJsonlFiles(savePath);
+  const items = [];
+  for (const file of files) {
+    const content = await fsp.readFile(file, 'utf8').catch(() => '');
+    for (const line of content.split(/\r?\n/)) {
+      if (!line.trim()) continue;
+      try {
+        const raw = JSON.parse(line);
+        const item = normalizeCollectorItem(platform, keyword, raw);
+        if (item) items.push(item);
+      } catch {
+        continue;
+      }
+    }
+  }
+  return items;
+}
+
+async function collectJsonlFiles(dirPath) {
+  const results = [];
+  async function walk(current) {
+    const entries = await fsp.readdir(current, { withFileTypes: true }).catch(() => []);
+    for (const entry of entries) {
+      const full = path.join(current, entry.name);
+      if (entry.isDirectory()) {
+        await walk(full);
+      } else if (entry.isFile() && entry.name.endsWith('.jsonl') && entry.name.includes('_contents_')) {
+        results.push(full);
+      }
+    }
+  }
+  await walk(dirPath);
+  return results;
+}
+
+function normalizeCollectorItem(platform, keyword, raw) {
+  const url = String(raw?.aweme_url || raw?.note_url || raw?.url || '').trim();
+  const title = String(raw?.title || raw?.desc || '').trim();
+  if (!url || !title) return null;
+
+  const metrics = platform === 'dy'
+    ? {
+      playCount: numberOrNull(raw?.play_count),
+      likeCount: numberOrNull(raw?.liked_count),
+      commentCount: numberOrNull(raw?.comment_count),
+      collectCount: numberOrNull(raw?.collected_count),
+      shareCount: numberOrNull(raw?.share_count),
+    }
+    : {
+      playCount: numberOrNull(raw?.play_count),
+      likeCount: numberOrNull(raw?.liked_count),
+      commentCount: numberOrNull(raw?.comment_count),
+      collectCount: numberOrNull(raw?.collected_count),
+      shareCount: numberOrNull(raw?.share_count),
+    };
+
+  return {
+    id: crypto.randomUUID(),
+    platform,
+    platformLabel: platform === 'dy' ? '抖音' : '小红书',
+    keyword,
+    keywords: String(raw?.source_keyword || keyword || '').split(',').map((item) => item.trim()).filter(Boolean),
+    title,
+    author: String(raw?.nickname || raw?.author || '').trim(),
+    url,
+    metrics,
+    raw,
+    selected: true,
+    status: 'preview',
+  };
+}
+
+function sanitizeFilePart(value) {
+  return String(value || 'keyword').replace(/[^\w\u4e00-\u9fa5.-]+/g, '_').slice(0, 80) || 'keyword';
+}
+
+async function saveCollectorSession(session) {
+  const filePath = path.join(collectorDir, `${session.id}.json`);
+  await fsp.writeFile(filePath, `${JSON.stringify(session, null, 2)}\n`, 'utf8');
+  await fsp.writeFile(collectorStatePath, `${JSON.stringify({ latestSessionId: session.id }, null, 2)}\n`, 'utf8');
+}
+
+async function readCollectorSession(sessionId) {
+  if (!sessionId) return readLatestCollectorSession();
+  if (collectorSessions.has(sessionId)) return collectorSessions.get(sessionId);
+  const filePath = path.join(collectorDir, `${sessionId}.json`);
+  try {
+    const session = JSON.parse(await fsp.readFile(filePath, 'utf8'));
+    collectorSessions.set(sessionId, session);
+    return session;
+  } catch {
+    return null;
+  }
+}
+
+async function readLatestCollectorSession() {
+  try {
+    const state = JSON.parse(await fsp.readFile(collectorStatePath, 'utf8'));
+    if (state?.latestSessionId) {
+      const session = await readCollectorSession(state.latestSessionId);
+      if (session) return session;
+    }
+  } catch {
+    return { id: '', status: 'idle', keywords: [], platforms: [], loginType: 'qrcode', python: 'python3', cookie: '', items: [], logs: [] };
+  }
+  return { id: '', status: 'idle', keywords: [], platforms: [], loginType: 'qrcode', python: 'python3', cookie: '', items: [], logs: [] };
 }
 
 async function processLinkJob(job, url) {
@@ -831,6 +1156,8 @@ function getPublicConfig() {
     maskedVolcengineApiKey: maskSecret(process.env.VOLCENGINE_API_KEY || ''),
     xhsDownloaderDir: process.env.XHS_DOWNLOADER_DIR || '',
     xhsPython: process.env.XHS_PYTHON || 'python3',
+    xhsCookie: maskSecret(process.env.XHS_COOKIE || ''),
+    xhsDownloaderResolvedDir: '',
     hasOpenAIKey: Boolean(process.env.OPENAI_API_KEY),
     maskedOpenAIKey: maskSecret(process.env.OPENAI_API_KEY || ''),
   };
@@ -859,6 +1186,7 @@ function pickConfigUpdates(body) {
     volcengineEnablePunc: 'VOLCENGINE_ENABLE_PUNC',
     xhsDownloaderDir: 'XHS_DOWNLOADER_DIR',
     xhsPython: 'XHS_PYTHON',
+    xhsCookie: 'XHS_COOKIE',
   };
   const updates = {};
   for (const [inputKey, envKey] of Object.entries(schema)) {
@@ -918,6 +1246,14 @@ async function appendHistory(entry) {
   await fsp.appendFile(historyPath, `${JSON.stringify(payload)}\n`, 'utf8');
 }
 
+async function appendAnalysisHistory(entry) {
+  const payload = {
+    ...entry,
+    savedAt: Date.now(),
+  };
+  await fsp.appendFile(analysisHistoryPath, `${JSON.stringify(payload)}\n`, 'utf8');
+}
+
 async function readHistory() {
   let content = '';
   try {
@@ -940,6 +1276,28 @@ async function readHistory() {
     .sort((a, b) => (b.savedAt || 0) - (a.savedAt || 0));
 }
 
+async function readAnalysisHistory() {
+  let content = '';
+  try {
+    content = await fsp.readFile(analysisHistoryPath, 'utf8');
+  } catch (error) {
+    if (error.code === 'ENOENT') return [];
+    throw error;
+  }
+  return content
+    .split(/\r?\n/)
+    .filter(Boolean)
+    .map((line) => {
+      try {
+        return JSON.parse(line);
+      } catch {
+        return null;
+      }
+    })
+    .filter(Boolean)
+    .sort((a, b) => (b.createdAt || b.savedAt || 0) - (a.createdAt || a.savedAt || 0));
+}
+
 async function writeHistory(items) {
   const content = items.map((item) => JSON.stringify(item)).join('\n');
   await fsp.writeFile(historyPath, content ? `${content}\n` : '', 'utf8');
@@ -952,6 +1310,36 @@ async function deleteHistoryEntry(jobId) {
   if (!deleted) return { deleted: 0, history };
   await writeHistory(next);
   return { deleted, history: next };
+}
+
+async function writeAnalysisHistory(items) {
+  const content = items.map((item) => JSON.stringify(item)).join('\n');
+  await fsp.writeFile(analysisHistoryPath, content ? `${content}\n` : '', 'utf8');
+}
+
+async function deleteAnalysisHistoryEntry(analysisId) {
+  const analyses = await readAnalysisHistory();
+  const next = analyses.filter((item) => item.analysisId !== analysisId);
+  const deleted = analyses.length - next.length;
+  if (!deleted) return { deleted: 0, analyses };
+  await writeAnalysisHistory(next);
+  return { deleted, analyses: next };
+}
+
+function cloneHistoryRecord(record) {
+  return {
+    jobId: record.jobId,
+    source: record.source,
+    originalName: record.originalName,
+    title: record.title,
+    metrics: record.metrics || {},
+    transcript: record.transcript || '',
+    summary: record.summary || '',
+    durationMs: record.durationMs || 0,
+    deletedVideoPath: record.deletedVideoPath || null,
+    createdAt: record.createdAt || null,
+    finishedAt: record.finishedAt || null,
+  };
 }
 
 function quoteEnvValue(value) {
@@ -1012,7 +1400,7 @@ async function downloadWithDouyinTool(job, url, workDir) {
 }
 
 async function downloadWithXhsTool(job, url, workDir) {
-  const toolDir = process.env.XHS_DOWNLOADER_DIR;
+  const toolDir = await resolveXhsDownloaderDir();
   if (!toolDir) throw new Error('缺少 XHS_DOWNLOADER_DIR。请先 clone JoeanAmier/XHS-Downloader 并安装依赖。');
   updateJob(job, { progress: '调用本地小红书下载器' });
   const args = [
@@ -1032,6 +1420,13 @@ async function downloadWithXhsTool(job, url, workDir) {
   ];
   if (process.env.XHS_COOKIE) args.push('-ck', process.env.XHS_COOKIE);
   return runCommand(process.env.XHS_PYTHON || 'python3', args, { cwd: toolDir, job, label: 'xhs' });
+}
+
+async function resolveXhsDownloaderDir() {
+  const configured = String(process.env.XHS_DOWNLOADER_DIR || '').trim();
+  if (configured && await directoryExists(configured)) return configured;
+  if (await directoryExists(xhsDownloaderFallbackDir)) return xhsDownloaderFallbackDir;
+  return configured;
 }
 
 async function resolveWithAIDouyin(url) {
@@ -1320,6 +1715,15 @@ function runCommand(command, args, options = {}) {
     });
     let stderr = '';
     let stdout = '';
+    let timeoutId = null;
+    if (options.timeoutMs) {
+      timeoutId = setTimeout(() => {
+        child.kill('SIGTERM');
+        setTimeout(() => child.kill('SIGKILL'), 5000).unref?.();
+        reject(new Error(`${command} timed out after ${options.timeoutMs}ms`));
+      }, options.timeoutMs);
+      timeoutId.unref?.();
+    }
     child.stdout.on('data', (chunk) => {
       const text = chunk.toString();
       stdout += text;
@@ -1332,6 +1736,7 @@ function runCommand(command, args, options = {}) {
     });
     child.on('error', reject);
     child.on('close', (code) => {
+      if (timeoutId) clearTimeout(timeoutId);
       const output = `${stdout}\n${stderr}`.trim();
       if (code === 0) {
         if (options.job) addJobLog(options.job, `命令完成：${options.label || command}`);

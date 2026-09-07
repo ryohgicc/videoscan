@@ -13,6 +13,7 @@ VideoScan is a small local web app for batch video/audio transcription. It accep
 - Optional local open-source downloaders for Douyin/Xiaohongshu.
 - Show video metrics from downloader metadata when available.
 - Analyze selected history records with an OpenAI-compatible LLM.
+- Persist analysis results into a separate analysis history, with source record snapshots.
 - Browser extension capture button for Douyin/Xiaohongshu/Instagram/TikTok pages.
 - Export text, SRT, and Markdown.
 - Optionally delete downloaded video files after transcription to save disk space.
@@ -97,6 +98,8 @@ Xiaohongshu may need a web cookie for stable/high-quality downloads:
 ```bash
 XHS_COOKIE=your_xiaohongshu_web_cookie
 ```
+
+If you place `XHS-Downloader/` directly under this repo, `VideoScan` will auto-detect it even without `XHS_DOWNLOADER_DIR`.
 
 ## Paid Resolver Fallback
 

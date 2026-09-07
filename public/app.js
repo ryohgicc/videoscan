@@ -10,6 +10,15 @@ const jobStatsEl = document.querySelector('#jobStats');
 const analysisPurposeEl = document.querySelector('#analysisPurpose');
 const analysisMessageEl = document.querySelector('#analysisMessage');
 const analysisResultEl = document.querySelector('#analysisResult');
+const analysisHistoryEl = document.querySelector('#analysisHistory');
+const analysisHistoryCountEl = document.querySelector('#analysisHistoryCount');
+const collectorKeywordsEl = document.querySelector('#collectorKeywords');
+const collectorPlatformsEl = document.querySelector('#collectorPlatforms');
+const collectorLimitEl = document.querySelector('#collectorLimit');
+const collectorRetriesEl = document.querySelector('#collectorRetries');
+const collectorStatusEl = document.querySelector('#collectorStatus');
+const collectorTableEl = document.querySelector('#collectorTable');
+const collectorStatsEl = document.querySelector('#collectorStats');
 let currentConfig = {};
 
 document.querySelector('#submitLinks').addEventListener('click', submitLinks);
@@ -25,16 +34,29 @@ document.querySelector('#openSettings').addEventListener('click', openSettings);
 document.querySelector('#saveConfig').addEventListener('click', saveConfig);
 document.querySelector('#testSummaryLlm').addEventListener('click', testSummaryLlm);
 document.querySelector('#testAsrApi').addEventListener('click', testAsrApi);
+document.querySelector('#startCollector').addEventListener('click', startCollector);
+document.querySelector('#refreshCollector').addEventListener('click', loadCollectorSession);
+document.querySelector('#selectAllCollector').addEventListener('click', selectAllCollector);
+document.querySelector('#clearCollectorSelection').addEventListener('click', clearCollectorSelection);
+document.querySelector('#submitSelectedCollector').addEventListener('click', submitSelectedCollector);
+document.querySelector('#exportCollector').addEventListener('click', exportCollectorResults);
 
 let jobs = [];
 let historyItems = [];
+let analysisHistoryItems = [];
 let selectedHistoryIds = new Set();
 let lastAnalysisText = '';
+let lastAnalysisId = '';
 let pollTimer = null;
+let collectorSessionId = '';
+let collectorItems = [];
+let selectedCollectorIds = new Set();
 
 await loadConfig();
 await loadJobs();
 await loadHistory();
+await loadAnalysisHistory();
+await loadCollectorSession();
 switchTab(location.hash.replace('#', '') || 'current');
 startPolling();
 
@@ -80,9 +102,23 @@ function fillConfigForm(config) {
   document.querySelector('#volcengineEnablePunc').checked = config.volcengineEnablePunc !== false;
   document.querySelector('#xhsDownloaderDir').value = config.xhsDownloaderDir || '';
   document.querySelector('#xhsPython').value = config.xhsPython || 'python3';
+  document.querySelector('#xhsCookie').value = '';
+  document.querySelector('#xhsCookie').placeholder = config.xhsCookie ? '********' : '可选';
   document.querySelector('#enableSummary').checked = Boolean(config.enableSummary);
   document.querySelector('#deleteVideoAfterTranscribe').checked = Boolean(config.deleteVideoAfterTranscribe);
   updateAsrModeVisibility();
+}
+
+function loadCollectorDefaults() {
+  collectorKeywordsEl.value = collectorKeywordsEl.value || '';
+  collectorLimitEl.value = collectorLimitEl.value || '20';
+  collectorRetriesEl.value = collectorRetriesEl.value || '2';
+}
+
+function fillCollectorControls(session = {}) {
+  collectorKeywordsEl.value = (session.keywords || []).join('\n');
+  collectorLimitEl.value = session.limitPerKeyword || 20;
+  collectorRetriesEl.value = session.retries ?? 2;
 }
 
 function openSettings() {
@@ -119,6 +155,8 @@ async function saveConfig(options = {}) {
   if (openaiApiKey) payload.openaiApiKey = openaiApiKey;
   const volcengineApiKey = document.querySelector('#volcengineApiKey').value.trim();
   if (volcengineApiKey) payload.volcengineApiKey = volcengineApiKey;
+  const xhsCookie = document.querySelector('#xhsCookie').value.trim();
+  if (xhsCookie) payload.xhsCookie = xhsCookie;
   const response = await fetch('/api/config', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -132,6 +170,7 @@ async function saveConfig(options = {}) {
   const payloadResult = await response.json().catch(() => ({}));
   document.querySelector('#openaiApiKey').value = '';
   document.querySelector('#volcengineApiKey').value = '';
+  document.querySelector('#xhsCookie').value = '';
   configMessageEl.textContent = options.quiet ? configMessageEl.textContent : '已保存到 .env';
   if (payloadResult.config) fillConfigForm(payloadResult.config);
   await loadConfig();
@@ -231,6 +270,165 @@ async function submitFiles() {
   startPolling();
 }
 
+async function loadCollectorSession() {
+  const response = await fetch('/api/collector/session');
+  const payload = await response.json().catch(() => ({}));
+  collectorSessionId = payload.session?.id || '';
+  collectorItems = payload.session?.items || [];
+  selectedCollectorIds = new Set(collectorItems.filter((item) => item.selected !== false).map((item) => item.id));
+  renderCollectorTable();
+  fillCollectorControls(payload.session);
+}
+
+async function startCollector() {
+  const keywords = collectorKeywordsEl.value.split(/\n+/).map((line) => line.trim()).filter(Boolean);
+  const platforms = [...collectorPlatformsEl.selectedOptions].map((option) => option.value);
+  if (!keywords.length) {
+    collectorStatusEl.textContent = '请先输入关键词。';
+    return;
+  }
+  if (!platforms.length) {
+    collectorStatusEl.textContent = '请至少选择一个平台。';
+    return;
+  }
+  collectorStatusEl.textContent = '正在本地采集...';
+  const response = await fetch('/api/collector/run', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      keywords,
+      platforms,
+      limitPerKeyword: Number(collectorLimitEl.value || 20),
+      retries: Number(collectorRetriesEl.value || 0),
+    }),
+  });
+  const payload = await response.json().catch(() => ({}));
+  if (!response.ok || !payload.ok) {
+    collectorStatusEl.textContent = `采集失败：${payload.error || '未知错误'}`;
+    return;
+  }
+  collectorSessionId = payload.session?.id || '';
+  collectorItems = payload.session?.items || [];
+  selectedCollectorIds = new Set(collectorItems.map((item) => item.id));
+  renderCollectorTable();
+  collectorStatusEl.textContent = `采集完成，共 ${collectorItems.length} 条。请二次确认后再转写。`;
+}
+
+function renderCollectorTable() {
+  const total = collectorItems.length;
+  const selected = selectedCollectorIds.size;
+  collectorStatsEl.textContent = total ? `已采集 ${total} 条 · 已选 ${selected} 条` : '还没有结果。';
+  if (!total) {
+    collectorTableEl.innerHTML = '<tr><td colspan="7" class="meta">还没有采集结果。</td></tr>';
+    return;
+  }
+  collectorTableEl.innerHTML = collectorItems.map((item) => `
+    <tr>
+      <td><input type="checkbox" data-collector-select="${escapeAttribute(item.id)}" ${selectedCollectorIds.has(item.id) ? 'checked' : ''}></td>
+      <td>${escapeHtml(item.platformLabel || item.platform || '')}</td>
+      <td>
+        <div class="table-title">${escapeHtml(item.title || '')}</div>
+        <div class="table-subtitle">${escapeHtml(item.status || '')}</div>
+      </td>
+      <td>${escapeHtml(item.author || '')}</td>
+      <td>${escapeHtml(formatCollectorMetrics(item.metrics))}</td>
+      <td>${escapeHtml((item.keywords || []).join(' / '))}</td>
+      <td><a href="${escapeAttribute(item.url || '#')}" target="_blank" rel="noreferrer">打开</a></td>
+    </tr>
+  `).join('');
+  for (const input of document.querySelectorAll('[data-collector-select]')) {
+    input.addEventListener('change', () => {
+      if (input.checked) selectedCollectorIds.add(input.dataset.collectorSelect);
+      else selectedCollectorIds.delete(input.dataset.collectorSelect);
+      renderCollectorTable();
+      persistCollectorSelection();
+    });
+  }
+}
+
+function formatCollectorMetrics(metrics = {}) {
+  const parts = [
+    ['播', metrics.playCount],
+    ['赞', metrics.likeCount],
+    ['评', metrics.commentCount],
+    ['藏', metrics.collectCount],
+    ['转', metrics.shareCount],
+  ].filter(([, value]) => value !== null && value !== undefined && value !== '');
+  return parts.map(([label, value]) => `${label}${formatNumber(value)}`).join(' ');
+}
+
+function selectAllCollector() {
+  selectedCollectorIds = new Set(collectorItems.map((item) => item.id));
+  renderCollectorTable();
+  persistCollectorSelection();
+}
+
+function clearCollectorSelection() {
+  selectedCollectorIds = new Set();
+  renderCollectorTable();
+  persistCollectorSelection();
+}
+
+async function submitSelectedCollector() {
+  const items = collectorItems.filter((item) => selectedCollectorIds.has(item.id));
+  if (!items.length) {
+    collectorStatusEl.textContent = '请先选择要转写的结果。';
+    return;
+  }
+  const links = items.map((item) => item.url).filter(Boolean);
+  collectorStatusEl.textContent = '正在送入转写队列...';
+  const response = await fetch('/api/collector/submit', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ sessionId: collectorSessionId, ids: [...selectedCollectorIds] }),
+  });
+  const payload = await response.json().catch(() => ({}));
+  if (!response.ok || !payload.ok) {
+    collectorStatusEl.textContent = `提交失败：${payload.error || '未知错误'}`;
+    return;
+  }
+  collectorStatusEl.textContent = `已送入转写队列 ${links.length} 条。`;
+  await loadJobs();
+  startPolling();
+}
+
+async function persistCollectorSelection() {
+  if (!collectorSessionId) return;
+  await fetch('/api/collector/selection', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ sessionId: collectorSessionId, ids: [...selectedCollectorIds] }),
+  }).catch(() => {});
+}
+
+function exportCollectorResults() {
+  if (!collectorItems.length) return;
+  const header = ['platform', 'title', 'author', 'playCount', 'likeCount', 'commentCount', 'collectCount', 'shareCount', 'keywords', 'url'];
+  const rows = [header.join(',')];
+  for (const item of collectorItems) {
+    const metrics = item.metrics || {};
+    rows.push([
+      csvCell(item.platform || ''),
+      csvCell(item.title || ''),
+      csvCell(item.author || ''),
+      csvCell(metrics.playCount),
+      csvCell(metrics.likeCount),
+      csvCell(metrics.commentCount),
+      csvCell(metrics.collectCount),
+      csvCell(metrics.shareCount),
+      csvCell((item.keywords || []).join(' / ')),
+      csvCell(item.url || ''),
+    ].join(','));
+  }
+  const blob = new Blob([rows.join('\n')], { type: 'text/csv;charset=utf-8' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = 'collector-results.csv';
+  a.click();
+  URL.revokeObjectURL(url);
+}
+
 async function loadJobs() {
   const response = await fetch('/api/jobs');
   const payload = await response.json();
@@ -244,6 +442,16 @@ async function loadHistory() {
   historyItems = payload.history || [];
   selectedHistoryIds = new Set([...selectedHistoryIds].filter((id) => historyItems.some((item) => item.jobId === id)));
   renderHistory();
+}
+
+async function loadAnalysisHistory() {
+  const response = await fetch('/api/history/analysis');
+  const payload = await response.json();
+  analysisHistoryItems = payload.analyses || [];
+  if (analysisHistoryCountEl) {
+    analysisHistoryCountEl.textContent = analysisHistoryItems.length ? `共 ${analysisHistoryItems.length} 条` : '还没有分析记录。';
+  }
+  renderAnalysisHistory();
 }
 
 function renderJobs() {
@@ -366,6 +574,25 @@ async function deleteHistory(jobId) {
   updateAnalysisMessage('已删除历史记录。');
 }
 
+async function deleteAnalysisHistory(analysisId) {
+  const item = analysisHistoryItems.find((entry) => entry.analysisId === analysisId);
+  if (!item) return;
+  const title = item.purpose || analysisId;
+  if (!window.confirm(`删除这条分析记录？\n${title}`)) return;
+  const response = await fetch(`/api/history/analysis/${encodeURIComponent(analysisId)}`, { method: 'DELETE' });
+  if (!response.ok) {
+    updateAnalysisMessage('删除失败。');
+    return;
+  }
+  if (lastAnalysisId === analysisId) {
+    lastAnalysisId = '';
+    lastAnalysisText = '';
+    analysisResultEl.textContent = '还没有分析结果。';
+  }
+  await loadAnalysisHistory();
+  updateAnalysisMessage('已删除分析记录。');
+}
+
 function selectAllHistory() {
   const max = Number(document.querySelector('#historyAnalysisMaxItems').value || 10);
   selectedHistoryIds = new Set(historyItems.slice(0, max).map((item) => item.jobId));
@@ -412,8 +639,10 @@ async function analyzeSelectedHistory() {
     updateAnalysisMessage(`分析失败：${payload.error || '未知错误'}`);
     return;
   }
+  lastAnalysisId = payload.analysisEntry?.analysisId || '';
   lastAnalysisText = payload.analysis || '';
   analysisResultEl.textContent = lastAnalysisText || 'AI 没有返回内容。';
+  await loadAnalysisHistory();
   updateAnalysisMessage(`分析完成，共 ${payload.usedItems || jobIds.length} 条。`);
   switchTab('analysis');
 }
@@ -423,14 +652,72 @@ async function copyAnalysis() {
   await navigator.clipboard.writeText(lastAnalysisText);
 }
 
+function renderAnalysisHistory() {
+  if (!analysisHistoryEl) return;
+  if (!analysisHistoryItems.length) {
+    analysisHistoryEl.innerHTML = '<p class="meta">还没有分析记录。</p>';
+    return;
+  }
+  analysisHistoryEl.innerHTML = analysisHistoryItems.map((item) => {
+    const sourceTitles = (item.sourceHistory || [])
+      .map((record) => escapeHtml(record.title || record.originalName || record.jobId))
+      .join('、');
+    return `
+      <article class="analysis-item">
+        <div class="analysis-item-head">
+          <div>
+            <div class="source">${escapeHtml(item.purpose || '未命名分析')}</div>
+            <div class="meta">${escapeHtml(formatAnalysisMeta(item))}</div>
+          </div>
+          <div class="analysis-item-actions">
+            <button class="secondary" data-analysis-load="${escapeAttribute(item.analysisId)}">查看</button>
+            <button class="secondary danger" data-analysis-delete="${escapeAttribute(item.analysisId)}">删除</button>
+          </div>
+        </div>
+        <div class="meta analysis-sources">${sourceTitles || '无来源'}</div>
+      </article>
+    `;
+  }).join('');
+
+  for (const button of document.querySelectorAll('[data-analysis-load]')) {
+    button.addEventListener('click', () => loadAnalysisResult(button.dataset.analysisLoad));
+  }
+  for (const button of document.querySelectorAll('[data-analysis-delete]')) {
+    button.addEventListener('click', () => deleteAnalysisHistory(button.dataset.analysisDelete));
+  }
+}
+
+function formatAnalysisMeta(item) {
+  const count = item.usedItems || (item.sourceHistory || []).length || 0;
+  const when = formatDateTime(item.createdAt || item.savedAt || Date.now());
+  return `${count} 条 · ${when}`;
+}
+
+function formatDateTime(value) {
+  const date = new Date(Number(value || Date.now()));
+  if (Number.isNaN(date.getTime())) return '';
+  return date.toLocaleString('zh-CN', { hour12: false });
+}
+
+function loadAnalysisResult(analysisId) {
+  const item = analysisHistoryItems.find((entry) => entry.analysisId === analysisId);
+  if (!item) return;
+  lastAnalysisId = item.analysisId || '';
+  lastAnalysisText = item.analysis || '';
+  analysisResultEl.textContent = lastAnalysisText || 'AI 没有返回内容。';
+  switchTab('analysis');
+}
+
 function switchTab(name) {
-  if (!['current', 'history', 'analysis'].includes(name)) name = 'current';
+  if (!['current', 'collector', 'history', 'analysis'].includes(name)) name = 'current';
   for (const tab of document.querySelectorAll('.tab')) {
     tab.classList.toggle('active', tab.dataset.tab === name);
   }
   document.querySelector('#currentView').classList.toggle('active', name === 'current');
+  document.querySelector('#collectorView').classList.toggle('active', name === 'collector');
   document.querySelector('#historyView').classList.toggle('active', name === 'history');
   document.querySelector('#analysisView').classList.toggle('active', name === 'analysis');
+  if (name === 'collector') loadCollectorSession();
   if (name === 'history') loadHistory();
   if (location.hash !== `#${name}`) {
     history.replaceState(null, '', `#${name}`);
@@ -576,4 +863,12 @@ function escapeHtml(value) {
 
 function escapeAttribute(value) {
   return escapeHtml(value);
+}
+
+function csvCell(value) {
+  const text = String(value ?? '');
+  if (/[,"\n\r]/.test(text)) {
+    return `"${text.replaceAll('"', '""')}"`;
+  }
+  return text;
 }

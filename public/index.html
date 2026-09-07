@@ -22,6 +22,7 @@
 
         <nav class="tabs">
           <button id="tabCurrent" class="tab active" data-tab="current">当前任务</button>
+          <button id="tabCollector" class="tab" data-tab="collector">采集</button>
           <button id="tabHistory" class="tab" data-tab="history">历史记录</button>
           <button id="tabAnalysis" class="tab" data-tab="analysis">分析结果</button>
         </nav>
@@ -60,7 +61,80 @@
             </div>
           </div>
           <div id="jobs" class="jobs"></div>
+          </section>
         </section>
+
+        <section id="collectorView" class="tab-view">
+          <div class="input-grid">
+            <section class="panel">
+              <div class="panel-head">
+                <h2>关键词采集</h2>
+                <button id="startCollector">开始采集</button>
+              </div>
+              <p class="section-hint">统一使用设置里的抖音 / 小红书下载配置。</p>
+              <label>
+                <span>关键词</span>
+                <textarea id="collectorKeywords" placeholder="每行一个关键词"></textarea>
+              </label>
+              <div class="mini-grid">
+                <label>
+                  <span>平台</span>
+                  <select id="collectorPlatforms" multiple size="2">
+                    <option value="dy" selected>抖音</option>
+                    <option value="xhs" selected>小红书</option>
+                  </select>
+                </label>
+                <label>
+                  <span>每关键词条数</span>
+                  <input id="collectorLimit" type="number" min="1" max="100" step="1" value="20">
+                </label>
+                <label>
+                  <span>重试次数</span>
+                  <input id="collectorRetries" type="number" min="0" max="5" step="1" value="2">
+                </label>
+              </div>
+              <div class="section-hint" id="collectorStatus">等待采集。</div>
+            </section>
+
+            <section class="panel">
+              <div class="panel-head">
+                <h2>确认动作</h2>
+                <button id="submitSelectedCollector" class="secondary">确认转写</button>
+              </div>
+              <div class="collector-actions">
+                <button id="refreshCollector" type="button" class="secondary">刷新结果</button>
+                <button id="selectAllCollector" type="button" class="secondary">全选</button>
+                <button id="clearCollectorSelection" type="button" class="secondary">清空</button>
+                <button id="exportCollector" type="button" class="secondary">导出 CSV</button>
+              </div>
+              <p class="section-hint">先看采集结果，再勾选要转写的链接。</p>
+            </section>
+          </div>
+
+          <section class="queue">
+            <div class="panel-head">
+              <div class="panel-title">
+                <h2>采集结果</h2>
+                <div id="collectorStats" class="queue-stats">还没有结果。</div>
+              </div>
+            </div>
+            <div class="table-wrap">
+              <table class="data-table">
+                <thead>
+                  <tr>
+                    <th>选中</th>
+                    <th>平台</th>
+                    <th>标题</th>
+                    <th>作者</th>
+                    <th>指标</th>
+                    <th>关键词</th>
+                    <th>链接</th>
+                  </tr>
+                </thead>
+                <tbody id="collectorTable"></tbody>
+              </table>
+            </div>
+          </section>
         </section>
 
         <section id="historyView" class="tab-view">
@@ -88,10 +162,19 @@
         <section id="analysisView" class="tab-view">
           <section class="queue">
             <div class="panel-head">
-              <h2>分析结果</h2>
+              <div class="panel-title">
+                <h2>分析结果</h2>
+                <div id="analysisHistoryCount" class="queue-stats">还没有分析记录。</div>
+              </div>
               <button id="copyAnalysis" class="secondary">复制结果</button>
             </div>
             <div id="analysisResult" class="result analysis-result">还没有分析结果。</div>
+            <section class="analysis-history">
+              <div class="panel-head compact">
+                <h3>分析历史</h3>
+              </div>
+              <div id="analysisHistory" class="analysis-history-list"></div>
+            </section>
           </section>
         </section>
       </section>
@@ -203,6 +286,10 @@
               <label>
                 <span>小红书 Python 路径</span>
                 <input id="xhsPython" type="text" placeholder="python3.12">
+              </label>
+              <label>
+                <span>小红书 Cookie</span>
+                <input id="xhsCookie" type="password" autocomplete="off" placeholder="可选">
               </label>
               <label class="inline-field">
                 <input id="deleteVideoAfterTranscribe" type="checkbox">
