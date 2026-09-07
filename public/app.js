@@ -19,6 +19,11 @@ const collectorRetriesEl = document.querySelector('#collectorRetries');
 const collectorStatusEl = document.querySelector('#collectorStatus');
 const collectorTableEl = document.querySelector('#collectorTable');
 const collectorStatsEl = document.querySelector('#collectorStats');
+const collectorProgressFillEl = document.querySelector('#collectorProgressFill');
+const collectorProgressTextEl = document.querySelector('#collectorProgressText');
+const collectorProgressDetailEl = document.querySelector('#collectorProgressDetail');
+const collectorLogsEl = document.querySelector('#collectorLogs');
+const collectorLogStatsEl = document.querySelector('#collectorLogStats');
 let currentConfig = {};
 
 document.querySelector('#submitLinks').addEventListener('click', submitLinks);
@@ -36,6 +41,7 @@ document.querySelector('#testSummaryLlm').addEventListener('click', testSummaryL
 document.querySelector('#testAsrApi').addEventListener('click', testAsrApi);
 document.querySelector('#startCollector').addEventListener('click', startCollector);
 document.querySelector('#refreshCollector').addEventListener('click', loadCollectorSession);
+document.querySelector('#refreshCollectorLog').addEventListener('click', loadCollectorSession);
 document.querySelector('#selectAllCollector').addEventListener('click', selectAllCollector);
 document.querySelector('#clearCollectorSelection').addEventListener('click', clearCollectorSelection);
 document.querySelector('#submitSelectedCollector').addEventListener('click', submitSelectedCollector);
@@ -51,6 +57,7 @@ let pollTimer = null;
 let collectorSessionId = '';
 let collectorItems = [];
 let selectedCollectorIds = new Set();
+let collectorPollTimer = null;
 
 await loadConfig();
 await loadJobs();
@@ -273,11 +280,16 @@ async function submitFiles() {
 async function loadCollectorSession() {
   const response = await fetch('/api/collector/session');
   const payload = await response.json().catch(() => ({}));
-  collectorSessionId = payload.session?.id || '';
-  collectorItems = payload.session?.items || [];
+  const session = payload.session || {};
+  collectorSessionId = session.id || '';
+  collectorItems = session.items || [];
   selectedCollectorIds = new Set(collectorItems.filter((item) => item.selected !== false).map((item) => item.id));
   renderCollectorTable();
-  fillCollectorControls(payload.session);
+  fillCollectorControls(session);
+  renderCollectorProgress(session);
+  renderCollectorLogs(session);
+  if (session.status === 'running') startCollectorPolling();
+  else stopCollectorPolling();
 }
 
 async function startCollector() {
@@ -307,11 +319,10 @@ async function startCollector() {
     collectorStatusEl.textContent = `采集失败：${payload.error || '未知错误'}`;
     return;
   }
-  collectorSessionId = payload.session?.id || '';
-  collectorItems = payload.session?.items || [];
-  selectedCollectorIds = new Set(collectorItems.map((item) => item.id));
-  renderCollectorTable();
-  collectorStatusEl.textContent = `采集完成，共 ${collectorItems.length} 条。请二次确认后再转写。`;
+  collectorSessionId = payload.session?.id || collectorSessionId;
+  collectorStatusEl.textContent = '采集已开始，正在后台运行...';
+  startCollectorPolling();
+  await loadCollectorSession();
 }
 
 function renderCollectorTable() {
@@ -344,6 +355,70 @@ function renderCollectorTable() {
       persistCollectorSelection();
     });
   }
+}
+
+function renderCollectorProgress(session = {}) {
+  const progress = session.progress || {};
+  const done = Number(progress.done || 0);
+  const total = Number(progress.total || 0);
+  const ratio = total > 0 ? Math.min(1, done / total) : 0;
+  if (collectorProgressFillEl) {
+    collectorProgressFillEl.style.width = `${Math.round(ratio * 100)}%`;
+  }
+  if (collectorProgressTextEl) {
+    collectorProgressTextEl.textContent = session.status === 'running'
+      ? `正在采集：${progress.label || '处理中'}`
+      : session.status === 'done'
+        ? '采集完成'
+        : session.status === 'failed'
+          ? '采集失败'
+          : '等待采集';
+  }
+  if (collectorProgressDetailEl) {
+    collectorProgressDetailEl.textContent = `${done} / ${total}`;
+  }
+  if (session.status === 'running') {
+    collectorStatusEl.textContent = `正在采集：${progress.label || '处理中'}，已完成 ${done}/${total}`;
+  } else if (session.status === 'done') {
+    collectorStatusEl.textContent = `采集完成，共 ${collectorItems.length} 条。请二次确认后再转写。`;
+  } else if (session.status === 'failed') {
+    collectorStatusEl.textContent = `采集失败：${session.error || '未知错误'}`;
+  }
+}
+
+function renderCollectorLogs(session = {}) {
+  const logs = session.logs || [];
+  if (collectorLogStatsEl) {
+    collectorLogStatsEl.textContent = logs.length ? `最新 ${logs.length} 条` : '还没有日志。';
+  }
+  if (collectorLogsEl) {
+    collectorLogsEl.textContent = logs.length ? logs.join('\n') : '还没有日志。';
+  }
+}
+
+function startCollectorPolling() {
+  if (collectorPollTimer) return;
+  collectorPollTimer = setInterval(async () => {
+    const response = await fetch('/api/collector/session');
+    const payload = await response.json().catch(() => ({}));
+    const session = payload.session || {};
+    collectorSessionId = session.id || collectorSessionId;
+    collectorItems = session.items || collectorItems;
+    selectedCollectorIds = new Set(collectorItems.filter((item) => item.selected !== false).map((item) => item.id));
+    renderCollectorTable();
+    renderCollectorProgress(session);
+    renderCollectorLogs(session);
+    fillCollectorControls(session);
+    if (session.status !== 'running') {
+      stopCollectorPolling();
+    }
+  }, 2000);
+}
+
+function stopCollectorPolling() {
+  if (!collectorPollTimer) return;
+  clearInterval(collectorPollTimer);
+  collectorPollTimer = null;
 }
 
 function formatCollectorMetrics(metrics = {}) {
