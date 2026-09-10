@@ -12,10 +12,39 @@ const analysisMessageEl = document.querySelector('#analysisMessage');
 const analysisResultEl = document.querySelector('#analysisResult');
 const analysisHistoryEl = document.querySelector('#analysisHistory');
 const analysisHistoryCountEl = document.querySelector('#analysisHistoryCount');
+const analysisTaskStatusEl = document.querySelector('#analysisTaskStatus');
+const analysisTaskProgressEl = document.querySelector('#analysisTaskProgress');
+const analysisTaskPurposeEl = document.querySelector('#analysisTaskPurpose');
+const analysisTaskSourcesEl = document.querySelector('#analysisTaskSources');
+const analysisTaskLogsEl = document.querySelector('#analysisTaskLogs');
+const jobsPanelEl = document.querySelector('#jobsPanel');
+const toggleJobsPanelEl = document.querySelector('#toggleJobsPanel');
+const agentKeywordsEl = document.querySelector('#agentKeywords');
+const agentPlatformsEl = document.querySelector('#agentPlatforms');
+const agentLimitEl = document.querySelector('#agentLimit');
+const agentMinLikeEl = document.querySelector('#agentMinLike');
+const agentRecentDaysEl = document.querySelector('#agentRecentDays');
+const agentMaxVisibleEl = document.querySelector('#agentMaxVisible');
+const agentRetriesEl = document.querySelector('#agentRetries');
+const agentPurposeEl = document.querySelector('#agentPurpose');
+const agentMessageEl = document.querySelector('#agentMessage');
+const agentTaskStatusEl = document.querySelector('#agentTaskStatus');
+const agentTaskStageEl = document.querySelector('#agentTaskStage');
+const agentTaskDurationEl = document.querySelector('#agentTaskDuration');
+const agentTaskProgressEl = document.querySelector('#agentTaskProgress');
+const agentTaskLogsEl = document.querySelector('#agentTaskLogs');
+const agentResultMetaEl = document.querySelector('#agentResultMeta');
+const agentResultEl = document.querySelector('#agentResult');
+const agentLinksEl = document.querySelector('#agentLinks');
+const toastEl = document.querySelector('#toast');
 const collectorKeywordsEl = document.querySelector('#collectorKeywords');
 const collectorPlatformsEl = document.querySelector('#collectorPlatforms');
 const collectorLimitEl = document.querySelector('#collectorLimit');
 const collectorRetriesEl = document.querySelector('#collectorRetries');
+const collectorMinLikeEl = document.querySelector('#collectorMinLike');
+const collectorRecentDaysEl = document.querySelector('#collectorRecentDays');
+const collectorMaxVisibleEl = document.querySelector('#collectorMaxVisible');
+const collectorPlatformFilterEl = document.querySelector('#collectorPlatformFilter');
 const collectorStatusEl = document.querySelector('#collectorStatus');
 const collectorTableEl = document.querySelector('#collectorTable');
 const collectorStatsEl = document.querySelector('#collectorStats');
@@ -33,6 +62,7 @@ document.querySelector('#submitLinks').addEventListener('click', submitLinks);
 document.querySelector('#submitFiles').addEventListener('click', submitFiles);
 document.querySelector('#refresh').addEventListener('click', loadJobs);
 document.querySelector('#exportMarkdown').addEventListener('click', exportMarkdown);
+document.querySelector('#toggleJobsPanel').addEventListener('click', toggleJobsPanel);
 document.querySelector('#selectAllHistory').addEventListener('click', selectAllHistory);
 document.querySelector('#clearHistorySelection').addEventListener('click', clearHistorySelection);
 document.querySelector('#clearHistoryFilter').addEventListener('click', clearHistoryFilter);
@@ -49,13 +79,24 @@ document.querySelector('#selectAllCollector').addEventListener('click', selectAl
 document.querySelector('#clearCollectorSelection').addEventListener('click', clearCollectorSelection);
 document.querySelector('#submitSelectedCollector').addEventListener('click', submitSelectedCollector);
 document.querySelector('#exportCollector').addEventListener('click', exportCollectorResults);
+document.querySelector('#startAgent').addEventListener('click', startAgent);
+document.querySelector('#stopAgent').addEventListener('click', stopAgent);
+document.querySelector('#copyAgentResult').addEventListener('click', copyAgentResult);
+document.querySelector('#copyAgentLinks').addEventListener('click', copyAgentLinks);
+collectorMinLikeEl.addEventListener('input', renderCollectorTable);
+collectorRecentDaysEl.addEventListener('input', renderCollectorTable);
+collectorMaxVisibleEl.addEventListener('input', renderCollectorTable);
+collectorPlatformFilterEl.addEventListener('change', renderCollectorTable);
 
 let jobs = [];
 let historyItems = [];
 let historyKeywordFilter = '';
 let analysisHistoryItems = [];
+let analysisTask = null;
 let collectorHistoryItems = [];
 let selectedHistoryIds = new Set();
+let historySort = { key: 'playCount', direction: 'desc' };
+let collectorSort = { key: 'playCount', direction: 'desc' };
 let lastAnalysisText = '';
 let lastAnalysisId = '';
 let pollTimer = null;
@@ -63,15 +104,21 @@ let collectorSessionId = '';
 let collectorItems = [];
 let selectedCollectorIds = new Set();
 let collectorPollTimer = null;
+let agentTask = null;
 
 await loadConfig();
 await loadJobs();
 await loadHistory();
 await loadAnalysisHistory();
+await loadAnalysisTask();
+await loadAgentTask();
 await loadCollectorSession();
 await loadCollectorHistory();
 switchTab(location.hash.replace('#', '') || 'current');
 startPolling();
+updateJobsPanelToggleText();
+startAnalysisPolling();
+startAgentPolling();
 
 for (const tab of document.querySelectorAll('.tab')) {
   tab.addEventListener('click', () => switchTab(tab.dataset.tab));
@@ -128,13 +175,13 @@ function fillConfigForm(config) {
 
 function loadCollectorDefaults() {
   collectorKeywordsEl.value = collectorKeywordsEl.value || '';
-  collectorLimitEl.value = collectorLimitEl.value || '20';
+  collectorLimitEl.value = collectorLimitEl.value || '100';
   collectorRetriesEl.value = collectorRetriesEl.value || '2';
 }
 
 function fillCollectorControls(session = {}) {
   collectorKeywordsEl.value = (session.keywords || []).join('\n');
-  collectorLimitEl.value = session.limitPerKeyword || 20;
+  collectorLimitEl.value = session.limitPerKeyword || 100;
   collectorRetriesEl.value = session.retries ?? 2;
 }
 
@@ -253,6 +300,7 @@ async function submitLinks() {
   });
   linksEl.value = '';
   await loadJobs();
+  await loadHistory();
   startPolling();
 }
 
@@ -284,6 +332,7 @@ async function submitFiles() {
   await fetch('/api/jobs/files', { method: 'POST', body: form });
   filesEl.value = '';
   await loadJobs();
+  await loadHistory();
   startPolling();
 }
 
@@ -336,15 +385,200 @@ async function startCollector() {
   await loadCollectorHistory();
 }
 
+async function startAgent() {
+  const keywords = agentKeywordsEl.value.split(/\n+/).map((line) => line.trim()).filter(Boolean);
+  const platforms = [...agentPlatformsEl.selectedOptions].map((option) => option.value);
+  const purpose = agentPurposeEl.value.trim();
+  if (!keywords.length) {
+    agentMessageEl.textContent = '请先输入关键词。';
+    return;
+  }
+  if (!platforms.length) {
+    agentMessageEl.textContent = '请至少选择一个平台。';
+    return;
+  }
+  if (!purpose) {
+    agentMessageEl.textContent = '请填写总结目标。';
+    return;
+  }
+  const button = document.querySelector('#startAgent');
+  button.disabled = true;
+  agentMessageEl.textContent = '正在创建 Agent 任务...';
+  const response = await fetch('/api/agent/run', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      keywords,
+      platforms,
+      purpose,
+      limitPerKeyword: Number(agentLimitEl.value || 100),
+      minLike: agentMinLikeEl.value,
+      recentDays: agentRecentDaysEl.value,
+      maxVisible: agentMaxVisibleEl.value,
+      retries: Number(agentRetriesEl.value || 0),
+    }),
+  });
+  const payload = await response.json().catch(() => ({}));
+  button.disabled = false;
+  if (!response.ok || !payload.ok) {
+    agentMessageEl.textContent = `启动失败：${payload.error || '未知错误'}`;
+    return;
+  }
+  agentTask = payload.task;
+  renderAgentTask();
+  agentMessageEl.textContent = '任务已开始，Agent 会按顺序完成三个步骤。';
+  switchTab('agent');
+  startAgentPolling();
+}
+
+async function loadAgentTask() {
+  const response = await fetch('/api/agent/task');
+  const payload = await response.json().catch(() => ({}));
+  agentTask = payload.task || null;
+  renderAgentTask();
+}
+
+function renderAgentTask() {
+  const task = agentTask || {};
+  const status = {
+    idle: '等待',
+    queued: '排队中',
+    running: '执行中',
+    stopping: '停止中',
+    done: '完成',
+    failed: '失败',
+  }[task.status] || task.status || '等待';
+  const stageLabels = {
+    idle: '等待开始',
+    collecting: '1/4 采集候选视频',
+    filtering: '2/4 筛选候选视频',
+    transcribing: '3/4 转写入选视频',
+    summarizing: '4/4 生成总结',
+    completed: '已完成',
+    stopped: '已停止',
+    failed: '执行失败',
+  };
+  agentTaskStatusEl.textContent = status;
+  agentTaskStageEl.textContent = stageLabels[task.stage] || task.stage || '等待开始';
+  agentTaskDurationEl.textContent = `执行时长 ${formatAgentDuration(task)}`;
+  agentTaskProgressEl.textContent = task.progress || '等待开始';
+  agentTaskLogsEl.textContent = task.logs?.length ? task.logs.join('\n') : '还没有日志。';
+  const links = task.sourceLinks || [];
+  agentLinksEl.value = links.join('\n');
+  agentResultEl.innerHTML = task.analysis ? renderMarkdown(task.analysis) : '还没有结果。';
+  agentResultMetaEl.textContent = task.status === 'done'
+    ? `采集 ${task.candidateCount || 0} 条 · 入选 ${task.selectedItems?.length || 0} 条 · 转写 ${task.sourceHistory?.length || 0} 条`
+    : task.error || '完成后显示总结和入选链接';
+  agentMessageEl.textContent = task.status === 'failed' ? `任务失败：${task.error || '未知错误'}` : agentMessageEl.textContent;
+  const active = ['queued', 'running'].includes(task.status);
+  document.querySelector('#startAgent').disabled = active || task.status === 'stopping';
+  document.querySelector('#stopAgent').disabled = !active;
+  startAgentDurationTicker();
+}
+
+function formatAgentDuration(task = {}) {
+  if (!task.startedAt) return '0秒';
+  const end = task.finishedAt || Date.now();
+  const totalSeconds = Math.max(0, Math.floor((end - task.startedAt) / 1000));
+  const hours = Math.floor(totalSeconds / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  const seconds = totalSeconds % 60;
+  if (hours) return `${hours}小时${minutes}分${seconds}秒`;
+  if (minutes) return `${minutes}分${seconds}秒`;
+  return `${seconds}秒`;
+}
+
+function startAgentDurationTicker() {
+  if (window.agentDurationTimer) clearInterval(window.agentDurationTimer);
+  if (!agentTask || !['queued', 'running'].includes(agentTask.status)) {
+    window.agentDurationTimer = null;
+    return;
+  }
+  window.agentDurationTimer = setInterval(() => {
+    if (agentTaskDurationEl) {
+      agentTaskDurationEl.textContent = `执行时长 ${formatAgentDuration(agentTask)}`;
+    }
+  }, 1000);
+}
+
+function startAgentPolling() {
+  if (window.agentPollTimer) clearInterval(window.agentPollTimer);
+  window.agentPollTimer = setInterval(async () => {
+    await loadAgentTask();
+    if (!agentTask || ['idle', 'done', 'failed', 'stopped'].includes(agentTask.status)) {
+      clearInterval(window.agentPollTimer);
+      window.agentPollTimer = null;
+      document.querySelector('#startAgent').disabled = false;
+    }
+  }, 2000);
+}
+
+async function copyAgentResult() {
+  if (!agentTask?.analysis) return;
+  await copyTextWithToast(agentTask.analysis);
+}
+
+async function copyAgentLinks() {
+  if (!agentTask?.sourceLinks?.length) return;
+  await copyTextWithToast(agentTask.sourceLinks.join('\n'));
+}
+
+let toastTimer = null;
+
+function showToast(message, type = 'success') {
+  if (!toastEl) return;
+  toastEl.textContent = message;
+  toastEl.className = `toast visible ${type}`;
+  if (toastTimer) clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => {
+    toastEl.className = 'toast';
+  }, 1800);
+}
+
+async function copyTextWithToast(text) {
+  try {
+    await navigator.clipboard.writeText(text);
+    showToast('复制成功');
+  } catch (error) {
+    showToast('复制失败，请检查浏览器权限', 'error');
+    return false;
+  }
+}
+
+async function stopAgent() {
+  const button = document.querySelector('#stopAgent');
+  button.disabled = true;
+  agentMessageEl.textContent = '正在停止 Agent 任务...';
+  const response = await fetch('/api/agent/stop', { method: 'POST' });
+  const payload = await response.json().catch(() => ({}));
+  if (!response.ok || !payload.ok) {
+    button.disabled = false;
+    agentMessageEl.textContent = `停止失败：${payload.error || '未知错误'}`;
+    return;
+  }
+  agentTask = payload.task || agentTask;
+  renderAgentTask();
+  startAgentPolling();
+}
+
 function renderCollectorTable() {
   const total = collectorItems.length;
   const selected = selectedCollectorIds.size;
-  collectorStatsEl.textContent = total ? `已采集 ${total} 条 · 已选 ${selected} 条` : '还没有结果。';
+  const filteredItems = getFilteredCollectorItems();
+  const visibleSelected = filteredItems.filter((item) => selectedCollectorIds.has(item.id)).length;
+  collectorStatsEl.textContent = total
+    ? `已采集 ${total} 条 · 筛选后 ${filteredItems.length} 条 · 已选 ${visibleSelected} 条`
+    : '还没有结果。';
   if (!total) {
-    collectorTableEl.innerHTML = '<tr><td colspan="7" class="meta">还没有采集结果。</td></tr>';
+    collectorTableEl.innerHTML = '<tr><td colspan="12" class="meta">还没有采集结果。</td></tr>';
     return;
   }
-  collectorTableEl.innerHTML = collectorItems.map((item) => `
+  const items = sortMetricItems(filteredItems, collectorSort);
+  if (!items.length) {
+    collectorTableEl.innerHTML = '<tr><td colspan="12" class="meta">没有符合当前筛选条件的结果。</td></tr>';
+    return;
+  }
+  collectorTableEl.innerHTML = items.map((item) => `
     <tr>
       <td><input type="checkbox" data-collector-select="${escapeAttribute(item.id)}" ${selectedCollectorIds.has(item.id) ? 'checked' : ''}></td>
       <td>${escapeHtml(item.platformLabel || item.platform || '')}</td>
@@ -353,7 +587,12 @@ function renderCollectorTable() {
         <div class="table-subtitle">${escapeHtml(item.status || '')}</div>
       </td>
       <td>${escapeHtml(item.author || '')}</td>
-      <td>${escapeHtml(formatCollectorMetrics(item.metrics))}</td>
+      <td>${escapeHtml(String(metricValue(item.metrics, 'playCount') ?? 0))}</td>
+      <td>${escapeHtml(String(metricValue(item.metrics, 'likeCount') ?? 0))}</td>
+      <td>${escapeHtml(String(metricValue(item.metrics, 'commentCount') ?? 0))}</td>
+      <td>${escapeHtml(String(metricValue(item.metrics, 'collectCount') ?? 0))}</td>
+      <td>${escapeHtml(String(metricValue(item.metrics, 'shareCount') ?? 0))}</td>
+      <td>${escapeHtml(formatPublishedAt(item.publishedAt))}</td>
       <td>${escapeHtml((item.keywords || []).join(' / '))}</td>
       <td><a href="${escapeAttribute(item.url || '#')}" target="_blank" rel="noreferrer">打开</a></td>
     </tr>
@@ -366,6 +605,34 @@ function renderCollectorTable() {
       persistCollectorSelection();
     });
   }
+}
+
+function getFilteredCollectorItems() {
+  const platform = collectorPlatformFilterEl?.value || '';
+  const minLike = positiveNumberOrNull(collectorMinLikeEl?.value);
+  const recentDays = positiveNumberOrNull(collectorRecentDaysEl?.value);
+  const maxVisible = positiveNumberOrNull(collectorMaxVisibleEl?.value);
+  const cutoff = recentDays ? Date.now() - recentDays * 24 * 60 * 60 * 1000 : null;
+  const filtered = collectorItems.filter((item) => {
+    if (platform && item.platform !== platform) return false;
+    const likeCount = metricValue(item.metrics, 'likeCount');
+    if (minLike !== null && (likeCount === null || likeCount < minLike)) return false;
+    if (cutoff !== null && (!item.publishedAt || item.publishedAt < cutoff)) return false;
+    return true;
+  });
+  return maxVisible ? sortMetricItems(filtered, collectorSort).slice(0, maxVisible) : filtered;
+}
+
+function positiveNumberOrNull(value) {
+  if (value === null || value === undefined || value === '') return null;
+  const number = Number(value);
+  return Number.isFinite(number) && number > 0 ? number : null;
+}
+
+function formatPublishedAt(value) {
+  if (!value) return '未知';
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? '未知' : date.toLocaleDateString('zh-CN');
 }
 
 function renderCollectorProgress(session = {}) {
@@ -444,7 +711,7 @@ function formatCollectorMetrics(metrics = {}) {
 }
 
 function selectAllCollector() {
-  selectedCollectorIds = new Set(collectorItems.map((item) => item.id));
+  selectedCollectorIds = new Set(getFilteredCollectorItems().map((item) => item.id));
   renderCollectorTable();
   persistCollectorSelection();
 }
@@ -456,9 +723,11 @@ function clearCollectorSelection() {
 }
 
 async function submitSelectedCollector() {
-  const items = collectorItems.filter((item) => selectedCollectorIds.has(item.id));
+  const visibleIds = new Set(getFilteredCollectorItems().map((item) => item.id));
+  const selectedVisibleIds = [...selectedCollectorIds].filter((id) => visibleIds.has(id));
+  const items = collectorItems.filter((item) => selectedVisibleIds.includes(item.id));
   if (!items.length) {
-    collectorStatusEl.textContent = '请先选择要转写的结果。';
+    collectorStatusEl.textContent = '请先在当前筛选结果中选择要转写的视频。';
     return;
   }
   const links = items.map((item) => item.url).filter(Boolean);
@@ -466,7 +735,7 @@ async function submitSelectedCollector() {
   const response = await fetch('/api/collector/submit', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ sessionId: collectorSessionId, ids: [...selectedCollectorIds] }),
+    body: JSON.stringify({ sessionId: collectorSessionId, ids: selectedVisibleIds }),
   });
   const payload = await response.json().catch(() => ({}));
   if (!response.ok || !payload.ok) {
@@ -566,12 +835,21 @@ async function loadAnalysisHistory() {
   renderAnalysisHistory();
 }
 
+async function loadAnalysisTask() {
+  const response = await fetch('/api/history/analysis/task');
+  const payload = await response.json().catch(() => ({}));
+  analysisTask = payload.task || null;
+  renderAnalysisTask();
+}
+
 function renderJobs() {
   updateJobStats();
   if (!jobs.length) {
-    jobsEl.innerHTML = '<p class="meta">还没有任务。</p>';
+    jobsEl.innerHTML = '<p class="meta compact-empty">没有进行中的任务。</p>';
+    updateJobsPanelState(false);
     return;
   }
+  updateJobsPanelState(jobs.some((job) => ['queued', 'running', 'failed'].includes(job.status)));
 
   jobsEl.innerHTML = jobs.map((job) => {
     const body = job.status === 'failed'
@@ -597,6 +875,23 @@ function renderJobs() {
   for (const button of document.querySelectorAll('[data-copy]')) {
     button.addEventListener('click', () => copyJob(button.dataset.copy));
   }
+}
+
+function toggleJobsPanel() {
+  if (!jobsPanelEl) return;
+  jobsPanelEl.open = !jobsPanelEl.open;
+  updateJobsPanelToggleText();
+}
+
+function updateJobsPanelState(shouldOpen) {
+  if (!jobsPanelEl) return;
+  if (shouldOpen) jobsPanelEl.open = true;
+  updateJobsPanelToggleText();
+}
+
+function updateJobsPanelToggleText() {
+  if (!toggleJobsPanelEl || !jobsPanelEl) return;
+  toggleJobsPanelEl.textContent = jobsPanelEl.open ? '收起' : '展开';
 }
 
 function updateJobStats() {
@@ -636,6 +931,7 @@ function renderHistory() {
     return;
   }
 
+  const items = sortMetricItems(visibleItems, historySort);
   historyEl.innerHTML = `
     <table class="data-table">
       <thead>
@@ -644,14 +940,18 @@ function renderHistory() {
           <th>标题</th>
           <th>来源</th>
           <th>关键词</th>
-          <th>指标</th>
+          <th><button class="table-sort" data-history-sort="playCount">播放</button></th>
+          <th><button class="table-sort" data-history-sort="likeCount">点赞</button></th>
+          <th><button class="table-sort" data-history-sort="commentCount">评论</button></th>
+          <th><button class="table-sort" data-history-sort="collectCount">收藏</button></th>
+          <th><button class="table-sort" data-history-sort="shareCount">转发</button></th>
           <th>时长</th>
           <th>文字稿</th>
           <th>操作</th>
         </tr>
       </thead>
       <tbody>
-        ${visibleItems.map((item) => `
+        ${items.map((item) => `
           <tr>
             <td>
               <input type="checkbox" data-history-select="${escapeAttribute(item.jobId)}" ${selectedHistoryIds.has(item.jobId) ? 'checked' : ''}>
@@ -665,7 +965,11 @@ function renderHistory() {
             <td>
               <div class="table-subtitle">${escapeHtml((item.sourceKeywords || []).join(' / ') || item.keyword || '无')}</div>
             </td>
-            <td>${escapeHtml(formatHistoryMetrics(item.metrics))}</td>
+            <td>${escapeHtml(String(metricValue(item.metrics, 'playCount') ?? 0))}</td>
+            <td>${escapeHtml(String(metricValue(item.metrics, 'likeCount') ?? 0))}</td>
+            <td>${escapeHtml(String(metricValue(item.metrics, 'commentCount') ?? 0))}</td>
+            <td>${escapeHtml(String(metricValue(item.metrics, 'collectCount') ?? 0))}</td>
+            <td>${escapeHtml(String(metricValue(item.metrics, 'shareCount') ?? 0))}</td>
             <td>${escapeHtml(formatDuration(item.durationMs || 0))}</td>
             <td>
               <div class="table-subtitle">${escapeHtml(truncateText(item.transcript || '', 120) || '无文字稿')}</div>
@@ -695,8 +999,24 @@ function renderHistory() {
       updateAnalysisMessage();
     });
   }
+  for (const button of document.querySelectorAll('[data-history-sort]')) {
+    button.addEventListener('click', () => toggleHistorySort(button.dataset.historySort));
+  }
+  for (const button of document.querySelectorAll('[data-collector-sort]')) {
+    button.addEventListener('click', () => toggleCollectorSort(button.dataset.collectorSort));
+  }
   updateAnalysisMessage();
   updateHistoryCount(visibleItems.length, historyItems.length);
+}
+
+function toggleHistorySort(key) {
+  historySort = nextSortState(historySort, key);
+  renderHistory();
+}
+
+function toggleCollectorSort(key) {
+  collectorSort = nextSortState(collectorSort, key);
+  renderCollectorTable();
 }
 
 function formatHistoryMetrics(metrics = {}) {
@@ -710,6 +1030,30 @@ function formatHistoryMetrics(metrics = {}) {
   return parts.map(([label, value]) => `${label}${formatNumber(value)}`).join(' ');
 }
 
+function sortMetricItems(items, sortState) {
+  const direction = sortState?.direction === 'asc' ? 1 : -1;
+  const key = sortState?.key || 'playCount';
+  return [...items].sort((a, b) => {
+    const av = metricValue(a.metrics, key);
+    const bv = metricValue(b.metrics, key);
+    const diff = Number(av ?? -Infinity) - Number(bv ?? -Infinity);
+    if (diff !== 0) return diff * direction;
+    return String(a.title || a.jobId || a.id || '').localeCompare(String(b.title || b.jobId || b.id || ''), 'zh-CN');
+  });
+}
+
+function metricValue(metrics = {}, key) {
+  const value = metrics?.[key];
+  return value === null || value === undefined || value === '' ? null : Number(value);
+}
+
+function nextSortState(current, key) {
+  if (current?.key === key) {
+    return { key, direction: current.direction === 'desc' ? 'asc' : 'desc' };
+  }
+  return { key, direction: 'desc' };
+}
+
 function truncateText(text, maxChars) {
   const value = String(text || '').trim();
   if (!value) return '';
@@ -719,7 +1063,7 @@ function truncateText(text, maxChars) {
 async function copyHistory(jobId) {
   const item = historyItems.find((entry) => entry.jobId === jobId);
   if (!item) return;
-  await navigator.clipboard.writeText(item.transcript || '');
+  await copyTextWithToast(item.transcript || '');
 }
 
 async function deleteHistory(jobId) {
@@ -808,7 +1152,7 @@ async function analyzeSelectedHistory() {
     return;
   }
   button.disabled = true;
-  updateAnalysisMessage('正在调用 LLM 分析...');
+  updateAnalysisMessage('正在创建分析任务...');
   const response = await fetch('/api/history/analyze', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -820,17 +1164,16 @@ async function analyzeSelectedHistory() {
     updateAnalysisMessage(`分析失败：${payload.error || '未知错误'}`);
     return;
   }
-  lastAnalysisId = payload.analysisEntry?.analysisId || '';
-  lastAnalysisText = payload.analysis || '';
-  analysisResultEl.textContent = lastAnalysisText || 'AI 没有返回内容。';
-  await loadAnalysisHistory();
-  updateAnalysisMessage(`分析完成，共 ${payload.usedItems || jobIds.length} 条。`);
+  await loadAnalysisTask();
+  renderAnalysisTask();
+  updateAnalysisMessage(`分析任务已创建，共 ${payload.task?.usedItems || jobIds.length} 条。`);
   switchTab('analysis');
+  startAnalysisPolling();
 }
 
 async function copyAnalysis() {
   if (!lastAnalysisText) return;
-  await navigator.clipboard.writeText(lastAnalysisText);
+  await copyTextWithToast(lastAnalysisText);
 }
 
 function renderAnalysisHistory() {
@@ -856,6 +1199,7 @@ function renderAnalysisHistory() {
           </div>
         </div>
         <div class="meta analysis-sources">${sourceTitles || '无来源'}</div>
+        <div class="analysis-snippet">${escapeHtml(truncateText(item.analysis || '', 180) || '无分析结果')}</div>
       </article>
     `;
   }).join('');
@@ -866,6 +1210,55 @@ function renderAnalysisHistory() {
   for (const button of document.querySelectorAll('[data-analysis-delete]')) {
     button.addEventListener('click', () => deleteAnalysisHistory(button.dataset.analysisDelete));
   }
+}
+
+function renderAnalysisTask() {
+  const task = analysisTask || {};
+  if (analysisTaskStatusEl) {
+    analysisTaskStatusEl.textContent = labelAnalysisStatus(task.status || 'idle');
+  }
+  if (analysisTaskProgressEl) {
+    analysisTaskProgressEl.textContent = task.progress || '等待分析';
+  }
+  if (analysisTaskPurposeEl) {
+    analysisTaskPurposeEl.textContent = task.purpose || '未命名分析';
+  }
+  if (analysisTaskSourcesEl) {
+    analysisTaskSourcesEl.textContent = (task.sourceHistory || [])
+      .map((record) => record.title || record.originalName || record.jobId)
+      .join('、') || '无来源';
+  }
+  if (analysisTaskLogsEl) {
+    const logs = task.logs || [];
+    analysisTaskLogsEl.textContent = logs.length ? logs.join('\n') : '还没有日志。';
+  }
+  if (task.analysis) {
+    analysisResultEl.innerHTML = renderMarkdown(task.analysis);
+  } else {
+    analysisResultEl.textContent = '还没有分析结果。';
+  }
+}
+
+function labelAnalysisStatus(status) {
+  return {
+    idle: '等待',
+    queued: '排队中',
+    running: '分析中',
+    done: '完成',
+    failed: '失败',
+  }[status] || status;
+}
+
+function startAnalysisPolling() {
+  if (window.analysisPollTimer) clearInterval(window.analysisPollTimer);
+  window.analysisPollTimer = setInterval(async () => {
+    await loadAnalysisTask();
+    if (!analysisTask || ['idle', 'done', 'failed'].includes(analysisTask.status)) {
+      clearInterval(window.analysisPollTimer);
+      window.analysisPollTimer = null;
+      await loadAnalysisHistory();
+    }
+  }, 2000);
 }
 
 function renderCollectorHistory() {
@@ -937,18 +1330,19 @@ function loadAnalysisResult(analysisId) {
   if (!item) return;
   lastAnalysisId = item.analysisId || '';
   lastAnalysisText = item.analysis || '';
-  analysisResultEl.textContent = lastAnalysisText || 'AI 没有返回内容。';
+  analysisResultEl.innerHTML = lastAnalysisText ? renderMarkdown(lastAnalysisText) : 'AI 没有返回内容。';
   switchTab('analysis');
 }
 
 function switchTab(name) {
-  if (!['current', 'collector', 'analysis'].includes(name)) name = 'collector';
+  if (!['agent', 'current', 'collector', 'analysis'].includes(name)) name = 'collector';
   for (const tab of document.querySelectorAll('.tab')) {
     tab.classList.toggle('active', tab.dataset.tab === name);
   }
   document.querySelector('#currentView').classList.toggle('active', name === 'current');
   document.querySelector('#collectorView').classList.toggle('active', name === 'collector');
   document.querySelector('#analysisView').classList.toggle('active', name === 'analysis');
+  document.querySelector('#agentView').classList.toggle('active', name === 'agent');
   if (name === 'collector') loadCollectorSession();
   if (location.hash !== `#${name}`) {
     history.replaceState(null, '', `#${name}`);
@@ -1023,7 +1417,7 @@ async function copyJob(id) {
   if (!job) return;
   const button = document.querySelector(`[data-copy="${id}"]:focus`);
   const kind = button?.dataset.copyKind || 'transcript';
-  await navigator.clipboard.writeText(kind === 'summary' ? (job.summary || '') : (job.transcript || ''));
+  await copyTextWithToast(kind === 'summary' ? (job.summary || '') : (job.transcript || ''));
 }
 
 function exportMarkdown() {
@@ -1054,6 +1448,7 @@ function startPolling() {
   if (pollTimer) clearInterval(pollTimer);
   pollTimer = setInterval(async () => {
     await loadJobs();
+    await loadHistory();
     if (!jobs.some((job) => ['queued', 'running'].includes(job.status))) {
       clearInterval(pollTimer);
       pollTimer = null;
@@ -1094,6 +1489,146 @@ function escapeHtml(value) {
 
 function escapeAttribute(value) {
   return escapeHtml(value);
+}
+
+function renderMarkdown(source) {
+  const text = String(source || '').replace(/\r\n?/g, '\n');
+  const blocks = [];
+  const fencePattern = /```([\s\S]*?)```/g;
+  let lastIndex = 0;
+  let match;
+
+  while ((match = fencePattern.exec(text))) {
+    if (match.index > lastIndex) {
+      blocks.push({ type: 'text', value: text.slice(lastIndex, match.index) });
+    }
+    blocks.push({ type: 'code', value: match[1].replace(/^\n/, '') });
+    lastIndex = match.index + match[0].length;
+  }
+  if (lastIndex < text.length) {
+    blocks.push({ type: 'text', value: text.slice(lastIndex) });
+  }
+
+  return blocks.map((block) => {
+    if (block.type === 'code') {
+      return `<pre><code>${escapeHtml(block.value).replace(/\n$/, '')}</code></pre>`;
+    }
+    return renderMarkdownTextBlock(block.value);
+  }).join('');
+}
+
+function renderMarkdownTextBlock(source) {
+  const lines = String(source || '').split('\n');
+  const parts = [];
+  let index = 0;
+
+  while (index < lines.length) {
+    const line = lines[index];
+    if (!line.trim()) {
+      index += 1;
+      continue;
+    }
+
+    const headingMatch = line.match(/^(#{1,6})\s+(.*)$/);
+    if (headingMatch) {
+      const level = headingMatch[1].length;
+      parts.push(`<h${level}>${renderInlineMarkdown(headingMatch[2])}</h${level}>`);
+      index += 1;
+      continue;
+    }
+
+    if (/^>\s?/.test(line)) {
+      const quoteLines = [];
+      while (index < lines.length && /^>\s?/.test(lines[index])) {
+        quoteLines.push(lines[index].replace(/^>\s?/, ''));
+        index += 1;
+      }
+      parts.push(`<blockquote>${renderMarkdownParagraphs(quoteLines.join('\n'))}</blockquote>`);
+      continue;
+    }
+
+    if (/^(\s*[-*+]\s+|\s*\d+\.\s+)/.test(line)) {
+      const listMatch = line.match(/^(\s*)([-*+]|\d+\.)\s+(.*)$/);
+      const ordered = Boolean(listMatch && /\d+\./.test(listMatch[2]));
+      const items = [];
+      while (index < lines.length) {
+        const current = lines[index].match(/^(\s*)([-*+]|\d+\.)\s+(.*)$/);
+        if (!current) break;
+        items.push(current[3]);
+        index += 1;
+      }
+      const tag = ordered ? 'ol' : 'ul';
+      parts.push(`<${tag}>${items.map((item) => `<li>${renderInlineMarkdown(item)}</li>`).join('')}</${tag}>`);
+      continue;
+    }
+
+    const table = readMarkdownTable(lines, index);
+    if (table) {
+      parts.push(table.html);
+      index = table.nextIndex;
+      continue;
+    }
+
+    const paragraph = [];
+    while (index < lines.length && lines[index].trim()) {
+      if (index !== 0 && /^(#{1,6})\s+/.test(lines[index])) break;
+      if (/^>\s?/.test(lines[index])) break;
+      if (/^(\s*[-*+]\s+|\s*\d+\.\s+)/.test(lines[index])) break;
+      if (/^```/.test(lines[index])) break;
+      paragraph.push(lines[index]);
+      index += 1;
+    }
+    parts.push(`<p>${renderInlineMarkdown(paragraph.join(' '))}</p>`);
+  }
+
+  return parts.join('');
+}
+
+function renderMarkdownParagraphs(source) {
+  return String(source || '')
+    .split('\n')
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .map((line) => `<p>${renderInlineMarkdown(line)}</p>`)
+    .join('');
+}
+
+function readMarkdownTable(lines, startIndex) {
+  if (startIndex + 1 >= lines.length) return null;
+  const header = lines[startIndex];
+  const separator = lines[startIndex + 1];
+  if (!header.includes('|') || !/^\s*\|?[\s:-]+(\|[\s:-]+)+\|?\s*$/.test(separator)) return null;
+  const rows = [header, separator];
+  let nextIndex = startIndex + 2;
+  while (nextIndex < lines.length && lines[nextIndex].includes('|') && lines[nextIndex].trim()) {
+    rows.push(lines[nextIndex]);
+    nextIndex += 1;
+  }
+  const splitRow = (row) => row.trim().replace(/^\|/, '').replace(/\|$/, '').split('|').map((cell) => cell.trim());
+  const headCells = splitRow(rows[0]);
+  const bodyRows = rows.slice(2).map(splitRow);
+  const html = [
+    '<table><thead><tr>',
+    ...headCells.map((cell) => `<th>${renderInlineMarkdown(cell)}</th>`),
+    '</tr></thead><tbody>',
+    ...bodyRows.map((row) => `<tr>${row.map((cell) => `<td>${renderInlineMarkdown(cell)}</td>`).join('')}</tr>`),
+    '</tbody></table>',
+  ].join('');
+  return { html, nextIndex };
+}
+
+function renderInlineMarkdown(source) {
+  let text = escapeHtml(String(source || ''));
+  text = text.replace(/```([\s\S]*?)```/g, (_, code) => `<pre><code>${code.trim()}</code></pre>`);
+  text = text.replace(/`([^`]+)`/g, '<code>$1</code>');
+  text = text.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
+  text = text.replace(/\*([^*]+)\*/g, '<em>$1</em>');
+  text = text.replace(/(?:^|\s)\[([^\]]+)\]\(([^)]+)\)/g, (match, label, href) => {
+    const safeHref = escapeAttribute(href).replace(/"/g, '&quot;');
+    return `${match.startsWith(' ') ? ' ' : ''}<a href="${safeHref}" target="_blank" rel="noreferrer">${label}</a>`;
+  });
+  text = text.replace(/\n/g, '<br>');
+  return text;
 }
 
 function csvCell(value) {

@@ -1,16 +1,44 @@
 # Changelog
 
+## 2026-09-10
+
+### Agent 工作流
+
+- 新增 `Agent 一键分析` Tab，将关键词采集、条件筛选、入选视频转写和 LLM 总结串成一个任务。
+- 支持按平台、最低点赞量、近几天发布时间和最多分析视频数筛选候选视频。
+- 修复确认转写时误把全量候选视频提交到第二阶段的问题，现在只提交筛选后的入选视频。
+- 增加 Agent 当前阶段、执行时长、实时进度和最终交付区域。
+- 增加 Agent 断点恢复，服务重启后会跳过已完成的转写并继续未完成任务。
+- 修复恢复任务的计数问题，转写进度不会超过入选视频总数。
+- 增加 Agent 停止执行：取消排队任务、终止活动子进程、保留已完成结果，并阻止进入总结阶段。
+- 增加逐条转写成功日志；历史恢复的结果会单独标记。
+- 转写失败日志现在包含任务实际错误原因。
+
+### 采集和历史
+
+- 关键词采集默认每个关键词最多采集 100 条，支持最多 500 条候选。
+- 将采集筛选条件从最低播放量调整为最低点赞量。
+- 增加采集结果的平台、点赞量、发布时间和数量筛选。
+- 增加平台筛选，并确保筛选后的全选、转写和导出范围一致。
+- 保存关键词到转写历史和分析历史，方便按关键词过滤和追溯来源。
+- 拆分采集、转写和分析历史，并保留分析使用的源记录快照。
+
+### 交互和文档
+
+- 增加分析和 Agent 结果的复制成功/失败 Toast 反馈。
+- 优化本项目 README，补充 Agent 使用方式、转写限制、配置和故障排查说明。
+- 将本地 `MediaCrawler/` 和 `XHS-Downloader/` 外部依赖目录加入 Git 忽略。
+
 ## 2026-09-07
 
-- Added keyword filtering to the `链接→文稿` history table and kept selection actions scoped to the filtered rows.
-- Split history storage and UI into per-workflow tables for collector, transcription, and analysis flows.
-- Added a collector tab for keyword-based Douyin/Xiaohongshu discovery with preview-first selection.
-- Unified collector settings with existing downloader config and added local XHS downloader auto-detection.
-- Wired XHS downloader support into the local download chain and saved XHS cookies in `.env`.
-- Verified end-to-end Douyin transcription and summary flow with local retries.
+- 增加本地采集器筛选、采集进度日志和小红书下载支持。
+- 增加本地 XHS 下载器自动检测，并将 Cookie 配置持久化到 `.env`。
+- 增加 `链接→文稿` 历史关键词过滤，以及选中范围隔离。
+- 增加分析历史持久化和视频源快照。
+- 验证抖音本地下载、转写和总结链路。
 
 ## 2026-09-04
 
-- Added browser extension support for TikTok and Instagram pages.
-- Added a page link scanner in the extension to collect and copy supported video links.
-- Added a Volcengine ASR punctuation setting and persisted it through `.env`.
+- 增加 TikTok 和 Instagram 浏览器扩展支持。
+- 增加扩展页面视频链接扫描和复制。
+- 增加火山引擎 ASR 标点配置并持久化到 `.env`。

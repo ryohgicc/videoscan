@@ -19,6 +19,8 @@ const publicDir = path.join(rootDir, 'public');
 const envPath = path.join(rootDir, '.env');
 const historyPath = path.join(dataDir, 'history.jsonl');
 const analysisHistoryPath = path.join(dataDir, 'analysis-history.jsonl');
+const analysisTaskPath = path.join(dataDir, 'analysis-task.json');
+const agentTaskPath = path.join(dataDir, 'agent-task.json');
 const collectorHistoryPath = path.join(dataDir, 'collector-history.jsonl');
 const collectorDir = path.join(dataDir, 'collector');
 const collectorStatePath = path.join(collectorDir, 'latest-session.json');
@@ -27,6 +29,7 @@ const xhsDownloaderFallbackDir = path.join(rootDir, 'XHS-Downloader');
 const jobs = new Map();
 const pendingJobs = [];
 const collectorSessions = new Map();
+const agentTaskRuntime = new Map();
 let activeJobCount = 0;
 
 await fsp.mkdir(dataDir, { recursive: true });
@@ -170,20 +173,117 @@ app.post('/api/history/analyze', async (req, res) => {
       .filter(Boolean);
     if (!selected.length) return res.status(404).json({ ok: false, error: '没有找到选中的历史记录。' });
 
-    const analysis = await analyzeHistoryRecords(purpose, selected, { maxChars });
-    const analysisEntry = {
-      analysisId: crypto.randomUUID(),
+    const task = {
+      analysisTaskId: crypto.randomUUID(),
       purpose,
-      analysis,
       usedItems: selected.length,
       maxItems,
       maxChars,
       sourceJobIds: selected.map((item) => item.jobId),
       sourceHistory: selected.map((item) => cloneHistoryRecord(item)),
+      status: 'queued',
+      progress: '准备分析',
+      logs: [],
       createdAt: Date.now(),
+      updatedAt: Date.now(),
+      startedAt: null,
+      finishedAt: null,
     };
-    await appendAnalysisHistory(analysisEntry);
-    res.json({ ok: true, analysis, analysisEntry, usedItems: selected.length, maxItems, maxChars });
+    await saveAnalysisTask(task);
+    void runAnalysisTask(task, selected, { purpose, maxChars, maxItems });
+    res.json({ ok: true, task });
+  } catch (error) {
+    res.status(400).json({ ok: false, error: error instanceof Error ? error.message : String(error) });
+  }
+});
+
+app.get('/api/history/analysis/task', async (_req, res) => {
+  res.json({ task: await readAnalysisTask() });
+});
+
+app.post('/api/agent/run', async (req, res) => {
+  try {
+    const keywords = normalizeLines(req.body?.keywords);
+    const platforms = normalizeLines(req.body?.platforms).filter((item) => ['dy', 'xhs'].includes(item));
+    const purpose = String(req.body?.purpose || '').trim();
+    const limitPerKeyword = clampNumber(req.body?.limitPerKeyword, 100, 1, 500);
+    const retries = clampNumber(req.body?.retries, 2, 0, 5);
+    const minLike = nonNegativeNumberOrNull(req.body?.minLike);
+    const recentDays = positiveNumberOrNull(req.body?.recentDays);
+    const maxVisible = positiveNumberOrNull(req.body?.maxVisible);
+    if (!keywords.length) return res.status(400).json({ ok: false, error: '请先输入关键词。' });
+    if (!platforms.length) return res.status(400).json({ ok: false, error: '请至少选择一个平台。' });
+    if (!purpose) return res.status(400).json({ ok: false, error: '请填写总结目标。' });
+    if (!process.env.OPENAI_API_KEY) return res.status(400).json({ ok: false, error: '缺少 OPENAI_API_KEY，请先在设置里配置 LLM。' });
+    if (!await directoryExists(mediaCrawlerDir)) {
+      return res.status(400).json({ ok: false, error: '未找到本地 MediaCrawler 目录。请先克隆到项目根目录。' });
+    }
+
+    const current = await readAgentTask();
+    if (current && ['queued', 'running', 'stopping'].includes(current.status)) {
+      return res.status(409).json({ ok: false, error: '已有 Agent 任务正在执行，请等待它完成。' });
+    }
+
+    const task = {
+      agentTaskId: crypto.randomUUID(),
+      status: 'queued',
+      stage: 'collecting',
+      progress: '准备采集候选视频',
+      keywords,
+      platforms,
+      purpose,
+      limitPerKeyword,
+      retries,
+      filters: { minLike, recentDays, maxVisible },
+      collectorSessionId: '',
+      candidateCount: 0,
+      selectedItems: [],
+      sourceLinks: [],
+      jobIds: [],
+      sourceHistory: [],
+      analysis: '',
+      logs: [],
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+      startedAt: null,
+      finishedAt: null,
+    };
+    await saveAgentTask(task);
+    agentTaskRuntime.set(task.agentTaskId, task);
+    void runAgentTask(task);
+    res.json({ ok: true, task });
+  } catch (error) {
+    res.status(400).json({ ok: false, error: error instanceof Error ? error.message : String(error) });
+  }
+});
+
+app.get('/api/agent/task', async (_req, res) => {
+  res.json({ task: await readAgentTask() });
+});
+
+app.post('/api/agent/stop', async (_req, res) => {
+  try {
+    const task = await readAgentTask();
+    if (!task || !['queued', 'running', 'stopping'].includes(task.status)) {
+      return res.status(400).json({ ok: false, error: '当前没有正在执行的 Agent 任务。' });
+    }
+    task.stopRequested = true;
+    task.status = 'stopping';
+    task.progress = '正在停止当前任务';
+    addAgentLog(task, '收到停止请求，正在取消排队和当前转写任务');
+    await saveAgentTask(task);
+    const runtimeTask = agentTaskRuntime.get(task.agentTaskId);
+    if (runtimeTask) runtimeTask.stopRequested = true;
+    cancelAgentJobs(task);
+    const collectorSession = task.collectorSessionId
+      ? await readCollectorSession(task.collectorSessionId)
+      : null;
+    if (collectorSession) collectorSession.stopRequested = true;
+    if (collectorSession?.activeProcess) {
+      collectorSession.activeProcess.kill('SIGTERM');
+      setTimeout(() => collectorSession.activeProcess?.kill('SIGKILL'), 5000).unref?.();
+    }
+    res.json({ ok: true, task });
   } catch (error) {
     res.status(400).json({ ok: false, error: error instanceof Error ? error.message : String(error) });
   }
@@ -214,7 +314,7 @@ app.post('/api/collector/run', async (req, res) => {
   try {
     const keywords = normalizeLines(req.body?.keywords);
     const platforms = normalizeLines(req.body?.platforms).filter((item) => ['dy', 'xhs'].includes(item));
-    const limitPerKeyword = clampNumber(req.body?.limitPerKeyword, 20, 1, 100);
+    const limitPerKeyword = clampNumber(req.body?.limitPerKeyword, 100, 1, 500);
     const retries = clampNumber(req.body?.retries, 2, 0, 5);
     if (!keywords.length) return res.status(400).json({ ok: false, error: '请先输入关键词。' });
     if (!platforms.length) return res.status(400).json({ ok: false, error: '请至少选择一个平台。' });
@@ -259,13 +359,14 @@ app.post('/api/collector/submit', async (req, res) => {
     if (!items.length) return res.status(400).json({ ok: false, error: 'no_selected_items' });
 
     const created = items.map((item) => {
+      const sourceKeywords = getCollectorItemKeywords(item);
       const job = createJob({
         type: 'collector',
         source: item.url,
         originalName: item.title ? `${item.title} · ${item.author || ''}`.trim() : item.url,
-        sourceKeywords: item.keywords || [],
+        sourceKeywords,
       });
-      enqueueJob(job, () => processLinkJob(job, item.url, { sourceKeywords: item.keywords || [] }));
+      enqueueJob(job, () => processLinkJob(job, item.url, { sourceKeywords }));
       return job;
     });
 
@@ -347,6 +448,8 @@ app.listen(port, () => {
   console.log(`VideoScan running at http://localhost:${port}`);
 });
 
+void recoverPersistedAgentTask();
+
 function createJob(input) {
   const id = crypto.randomUUID();
   const job = {
@@ -380,7 +483,10 @@ function scheduleJobs() {
     activeJobCount += 1;
     addJobLog(item.job, `开始执行，并发 ${activeJobCount}/${getMaxConcurrentJobs()}`);
     item.runner()
-      .catch((error) => failJob(item.job, error))
+      .catch((error) => {
+        if (item.job.cancelRequested) stopJob(item.job, 'Agent 任务已停止');
+        else failJob(item.job, error);
+      })
       .finally(() => {
         activeJobCount -= 1;
         scheduleJobs();
@@ -410,6 +516,16 @@ function clampNumber(value, fallback, min, max) {
   const number = Number(value);
   if (!Number.isFinite(number)) return fallback;
   return Math.min(max, Math.max(min, Math.floor(number)));
+}
+
+function positiveNumberOrNull(value) {
+  const number = Number(value);
+  return Number.isFinite(number) && number > 0 ? number : null;
+}
+
+function nonNegativeNumberOrNull(value) {
+  const number = Number(value);
+  return Number.isFinite(number) && number >= 0 ? number : null;
 }
 
 function normalizeLines(value) {
@@ -473,6 +589,7 @@ async function runMediaCrawlerSearch({ platform, keyword, limitPerKeyword, retri
       return await readCollectorItems(savePath, platform, keyword);
     } catch (error) {
       lastError = error;
+      if (session.stopRequested) throw new AgentStoppedError();
       session.logs.push(`[${platform}] ${keyword} 第 ${attempt} 次失败：${error instanceof Error ? error.message : String(error)}`);
       await saveCollectorSession(session);
     }
@@ -483,6 +600,7 @@ async function runMediaCrawlerSearch({ platform, keyword, limitPerKeyword, retri
 async function runCollectorSession(session, options) {
   const seen = new Set();
   try {
+    if (session.stopRequested) throw new AgentStoppedError();
     session.status = 'running';
     session.progress = session.progress || { done: 0, total: session.keywords.length * session.platforms.length, label: '准备开始' };
     session.logs = session.logs || [];
@@ -491,6 +609,7 @@ async function runCollectorSession(session, options) {
     let done = 0;
     for (const platform of session.platforms) {
       for (const keyword of session.keywords) {
+        if (session.stopRequested) throw new AgentStoppedError();
         session.progress = {
           done,
           total: session.progress.total || session.keywords.length * session.platforms.length,
@@ -536,6 +655,13 @@ async function runCollectorSession(session, options) {
     await saveCollectorSession(session);
     await appendCollectorHistory(session);
   } catch (error) {
+    if (error instanceof AgentStoppedError || session.stopRequested) {
+      session.status = 'stopped';
+      session.finishedAt = Date.now();
+      addCollectorLog(session, '采集已停止。');
+      await saveCollectorSession(session);
+      return;
+    }
     session.status = 'failed';
     session.finishedAt = Date.now();
     session.error = error instanceof Error ? error.message : String(error);
@@ -585,6 +711,15 @@ function normalizeCollectorItem(platform, keyword, raw) {
   const url = String(raw?.aweme_url || raw?.note_url || raw?.url || '').trim();
   const title = String(raw?.title || raw?.desc || '').trim();
   if (!url || !title) return null;
+  const publishedAt = timestampOrNull(
+    raw?.create_time
+      ?? raw?.publish_time
+      ?? raw?.published_at
+      ?? raw?.time
+      ?? raw?.last_update_time
+      ?? raw?.createTime
+      ?? raw?.publishTime,
+  );
 
   const metrics = platform === 'dy'
     ? {
@@ -611,11 +746,23 @@ function normalizeCollectorItem(platform, keyword, raw) {
     title,
     author: String(raw?.nickname || raw?.author || '').trim(),
     url,
+    publishedAt,
     metrics,
     raw,
     selected: true,
     status: 'preview',
   };
+}
+
+function timestampOrNull(value) {
+  if (value === null || value === undefined || value === '') return null;
+  if (typeof value === 'number' || /^\d+(?:\.\d+)?$/.test(String(value).trim())) {
+    const number = Number(value);
+    if (!Number.isFinite(number)) return null;
+    return Math.round(number < 1e12 ? number * 1000 : number);
+  }
+  const parsed = Date.parse(String(value));
+  return Number.isFinite(parsed) ? parsed : null;
 }
 
 function sanitizeFilePart(value) {
@@ -763,6 +910,7 @@ async function processMedia(job, mediaPath, workDir, meta = {}) {
     status: 'done',
     progress: '完成',
     title,
+    sourceKeywords: meta.sourceKeywords || job.sourceKeywords || [],
     metrics: meta.metrics || {},
     transcript: transcript.text,
     summary,
@@ -959,17 +1107,35 @@ async function summarizeTranscript(text, meta) {
     messages: [
       {
         role: 'system',
-        content: '你是中文视频内容整理助手。基于转写文本输出简洁标题、摘要和要点，不补充原文没有的信息。',
+        content: [
+          '你是中文视频内容整理助手。',
+          '你要输出适合直接复制发布的 Markdown 成稿，层级清晰、语气克制、信息密度高。',
+          '只基于用户提供的标题、作者和转写文本，不要编造不存在的信息。',
+          '标题要短，摘要要像成稿，核心要点要短句化。',
+          '不要输出多余解释，不要写“以下是”之类的口水话。',
+        ].join('\n'),
       },
       {
         role: 'user',
         content: [
-          `标题参考：${meta.title || meta.originalName || ''}`,
-          `作者参考：${meta.author || ''}`,
-          '转写文本：',
+          `标题：${meta.title || meta.originalName || ''}`,
+          `作者：${meta.author || ''}`,
+          `关键词：${(meta.sourceKeywords || []).join(' / ') || '无'}`,
+          '原文：',
           text.slice(0, 24000),
           '',
-          '请用 Markdown 输出：标题、摘要、核心要点。',
+          '请按以下 Markdown 结构输出：',
+          '## 标题',
+          '一句短标题。',
+          '',
+          '## 摘要',
+          '2-4 句，像可直接发布的成稿。',
+          '',
+          '## 核心要点',
+          '- 5-8 条，每条尽量短。',
+          '',
+          '## 适合转发的句子',
+          '- 3 条，可直接摘用的原句或改写句。',
         ].join('\n'),
       },
     ],
@@ -1007,14 +1173,27 @@ function buildHistoryAnalysisPrompt(purpose, records, maxChars) {
   return [
     `我的分析目的：${purpose}`,
     '',
-    '请综合分析下面这些视频脚本和宣传利益点，并按这个结构输出：',
-    '1. 总体结论：这些视频共同在卖什么、承诺什么结果。',
-    '2. 脚本结构拆解：开头钩子、问题铺垫、解决方案、证明/示例、行动号召。',
-    '3. 宣传利益点：列出高频利益点，并说明它们对应的用户痛点。',
-    '4. 单条视频亮点：逐条指出每条脚本最值得复用的点。',
-    '5. 数据线索：结合播放、点赞、评论、收藏、分享数据，谨慎推测哪些角度可能更有效；如果数据缺失就说明无法判断。',
-    '6. 可复用脚本模板：给出 3 个可以直接改写的新脚本框架。',
-    '7. 下一步建议：我应该优先测试哪些选题、利益点和表达方式。',
+    '请综合分析下面这些视频脚本和宣传利益点，并按这个 Markdown 结构输出：',
+    '## 1. 总体结论',
+    '这些视频共同在卖什么、承诺什么结果。',
+    '',
+    '## 2. 脚本结构拆解',
+    '开头钩子、问题铺垫、解决方案、证明/示例、行动号召。',
+    '',
+    '## 3. 宣传利益点',
+    '列出高频利益点，并说明它们对应的用户痛点。',
+    '',
+    '## 4. 单条视频亮点',
+    '逐条指出每条脚本最值得复用的点。',
+    '',
+    '## 5. 数据线索',
+    '结合播放、点赞、评论、收藏、分享数据，谨慎推测哪些角度可能更有效；如果数据缺失就说明无法判断。',
+    '',
+    '## 6. 可复用脚本模板',
+    '给出 3 个可以直接改写的新脚本框架。',
+    '',
+    '## 7. 下一步建议',
+    '我应该优先测试哪些选题、利益点和表达方式。',
     '',
     '选中的历史记录：',
     ...records.map((record, index) => formatHistoryRecordForPrompt(record, index + 1, maxChars)),
@@ -1031,6 +1210,7 @@ function formatHistoryRecordForPrompt(record, index, maxChars) {
     `## 视频 ${index}`,
     `标题：${record.title || record.originalName || '无标题'}`,
     `原链接：${record.source || ''}`,
+    `关键词：${(record.sourceKeywords || []).join(' / ') || '无'}`,
     `指标：${formatMetricsForPrompt(record.metrics)}`,
     '文字稿：',
     clipped || '无文字稿',
@@ -1351,12 +1531,81 @@ async function appendHistory(entry) {
   await fsp.appendFile(historyPath, `${JSON.stringify(payload)}\n`, 'utf8');
 }
 
+function getCollectorItemKeywords(item = {}) {
+  const values = [
+    ...(Array.isArray(item.keywords) ? item.keywords : []),
+    item.keyword,
+  ]
+    .map((value) => String(value || '').trim())
+    .filter(Boolean);
+  return [...new Set(values)];
+}
+
 async function appendAnalysisHistory(entry) {
   const payload = {
     ...entry,
     savedAt: Date.now(),
   };
   await fsp.appendFile(analysisHistoryPath, `${JSON.stringify(payload)}\n`, 'utf8');
+}
+
+function addAnalysisLog(task, message) {
+  const line = `[${new Date().toLocaleTimeString('zh-CN', { hour12: false })}] ${message}`;
+  task.logs = [...(task.logs || []), line].slice(-200);
+  task.updatedAt = Date.now();
+}
+
+async function runAnalysisTask(task, selected, options) {
+  try {
+    task.status = 'running';
+    task.progress = '整理输入';
+    task.startedAt = Date.now();
+    addAnalysisLog(task, `准备 ${selected.length} 条历史记录`);
+    await saveAnalysisTask(task);
+
+    task.progress = '构建分析提示词';
+    addAnalysisLog(task, '正在构建分析提示词');
+    await saveAnalysisTask(task);
+
+    task.progress = '调用 LLM';
+    addAnalysisLog(task, '正在调用 LLM 生成总结');
+    await saveAnalysisTask(task);
+
+    const analysis = await analyzeHistoryRecords(options.purpose, selected, { maxChars: options.maxChars });
+
+    task.progress = '保存结果';
+    addAnalysisLog(task, '正在保存分析结果');
+    const finishedAt = Date.now();
+    const analysisEntry = {
+      analysisId: crypto.randomUUID(),
+      analysisTaskId: task.analysisTaskId,
+      purpose: options.purpose,
+      analysis,
+      usedItems: selected.length,
+      maxItems: options.maxItems,
+      maxChars: options.maxChars,
+      sourceJobIds: selected.map((item) => item.jobId),
+      sourceHistory: selected.map((item) => cloneHistoryRecord(item)),
+      createdAt: task.createdAt,
+      finishedAt,
+    };
+    await appendAnalysisHistory(analysisEntry);
+
+    task.analysisId = analysisEntry.analysisId;
+    task.analysis = analysis;
+    task.status = 'done';
+    task.progress = '完成';
+    task.finishedAt = finishedAt;
+    addAnalysisLog(task, '分析完成');
+    await saveAnalysisTask(task);
+  } catch (error) {
+    task.status = 'failed';
+    task.progress = '失败';
+    task.error = error instanceof Error ? error.message : String(error);
+    task.finishedAt = Date.now();
+    addAnalysisLog(task, `分析失败：${task.error}`);
+    await saveAnalysisTask(task);
+  }
 }
 
 async function readHistory() {
@@ -1367,7 +1616,7 @@ async function readHistory() {
     if (error.code === 'ENOENT') return [];
     throw error;
   }
-  return content
+  const history = content
     .split(/\r?\n/)
     .filter(Boolean)
     .map((line) => {
@@ -1379,6 +1628,29 @@ async function readHistory() {
     })
     .filter(Boolean)
     .sort((a, b) => (b.savedAt || 0) - (a.savedAt || 0));
+  return await enrichHistoryKeywords(history);
+}
+
+async function enrichHistoryKeywords(history) {
+  if (!history.length) return history;
+  const keywordByUrl = new Map();
+  const collectorHistory = await readCollectorHistory().catch(() => []);
+  for (const session of collectorHistory) {
+    if (!Array.isArray(session.items)) continue;
+    for (const item of session.items) {
+      const url = String(item?.url || '').trim();
+      if (!url || keywordByUrl.has(url)) continue;
+      const keywords = getCollectorItemKeywords(item);
+      if (keywords.length) keywordByUrl.set(url, keywords);
+    }
+  }
+  return history.map((item) => {
+    const sourceKeywords = getCollectorItemKeywords(item);
+    if (sourceKeywords.length) return item;
+    const fallback = keywordByUrl.get(String(item.source || '').trim()) || [];
+    if (!fallback.length) return item;
+    return { ...item, sourceKeywords: fallback };
+  });
 }
 
 async function readAnalysisHistory() {
@@ -1412,6 +1684,13 @@ async function appendCollectorHistory(session) {
     limitPerKeyword: session.limitPerKeyword || 20,
     retries: session.retries ?? 2,
     itemCount: Array.isArray(session.items) ? session.items.length : 0,
+    items: Array.isArray(session.items)
+      ? session.items.map((item) => ({
+        url: item.url || '',
+        keyword: item.keyword || '',
+        keywords: Array.isArray(item.keywords) ? item.keywords : [],
+      }))
+      : [],
     createdAt: session.createdAt || Date.now(),
     finishedAt: session.finishedAt || Date.now(),
     savedAt: Date.now(),
@@ -1440,6 +1719,348 @@ async function writeAnalysisHistory(items) {
   await fsp.writeFile(analysisHistoryPath, content ? `${content}\n` : '', 'utf8');
 }
 
+async function saveAnalysisTask(task) {
+  const payload = {
+    ...task,
+    savedAt: Date.now(),
+  };
+  await fsp.writeFile(analysisTaskPath, `${JSON.stringify(payload, null, 2)}\n`, 'utf8');
+}
+
+async function readAnalysisTask() {
+  try {
+    const content = await fsp.readFile(analysisTaskPath, 'utf8');
+    const task = JSON.parse(content);
+    return task || createIdleAnalysisTask();
+  } catch (error) {
+    if (error.code === 'ENOENT') return createIdleAnalysisTask();
+    throw error;
+  }
+}
+
+function createIdleAnalysisTask() {
+  return {
+    analysisTaskId: '',
+    status: 'idle',
+    progress: '等待分析',
+    logs: [],
+    purpose: '',
+    sourceJobIds: [],
+    sourceHistory: [],
+    analysis: '',
+    createdAt: null,
+    updatedAt: null,
+    startedAt: null,
+    finishedAt: null,
+  };
+}
+
+async function saveAgentTask(task) {
+  const payload = { ...task, savedAt: Date.now() };
+  await fsp.writeFile(agentTaskPath, `${JSON.stringify(payload, null, 2)}\n`, 'utf8');
+}
+
+async function readAgentTask() {
+  try {
+    const content = await fsp.readFile(agentTaskPath, 'utf8');
+    return JSON.parse(content) || createIdleAgentTask();
+  } catch (error) {
+    if (error.code === 'ENOENT') return createIdleAgentTask();
+    throw error;
+  }
+}
+
+function createIdleAgentTask() {
+  return {
+    agentTaskId: '',
+    status: 'idle',
+    stage: 'idle',
+    progress: '等待开始',
+    keywords: [],
+    platforms: [],
+    purpose: '',
+    filters: {},
+    candidateCount: 0,
+    selectedItems: [],
+    sourceLinks: [],
+    jobIds: [],
+    sourceHistory: [],
+    analysis: '',
+    logs: [],
+    createdAt: null,
+    startedAt: null,
+    finishedAt: null,
+  };
+}
+
+function addAgentLog(task, message) {
+  const line = `[${new Date().toLocaleTimeString('zh-CN', { hour12: false })}] ${message}`;
+  task.logs = [...(task.logs || []), line].slice(-300);
+  task.updatedAt = Date.now();
+}
+
+function filterAgentItems(items, filters) {
+  const cutoff = filters.recentDays
+    ? Date.now() - filters.recentDays * 24 * 60 * 60 * 1000
+    : null;
+  const filtered = items.filter((item) => {
+    const likes = Number(item.metrics?.likeCount);
+    if (filters.minLike !== null && (!Number.isFinite(likes) || likes < filters.minLike)) return false;
+    if (cutoff !== null && (!item.publishedAt || item.publishedAt < cutoff)) return false;
+    return true;
+  });
+  filtered.sort((a, b) => Number(b.metrics?.likeCount || 0) - Number(a.metrics?.likeCount || 0));
+  return filters.maxVisible ? filtered.slice(0, filters.maxVisible) : filtered;
+}
+
+function waitForJob(jobId) {
+  return new Promise((resolve) => {
+    const check = () => {
+      const job = jobs.get(jobId);
+      if (!job || ['done', 'failed', 'stopped'].includes(job.status)) {
+        resolve(job || null);
+        return;
+      }
+      setTimeout(check, 1000);
+    };
+    check();
+  });
+}
+
+function cancelAgentJobs(task) {
+  const agentJobIds = new Set((task.jobIds || []).map(String));
+  for (let index = pendingJobs.length - 1; index >= 0; index -= 1) {
+    const pending = pendingJobs[index];
+    if (!agentJobIds.has(pending.job.id)) continue;
+    pendingJobs.splice(index, 1);
+    stopJob(pending.job, 'Agent 任务已停止');
+  }
+  for (const jobId of agentJobIds) {
+    const job = jobs.get(jobId);
+    if (!job || !['queued', 'running'].includes(job.status)) continue;
+    job.cancelRequested = true;
+    if (job.activeProcess) {
+      job.activeProcess.kill('SIGTERM');
+      setTimeout(() => job.activeProcess?.kill('SIGKILL'), 5000).unref?.();
+    } else if (job.status === 'queued') {
+      stopJob(job, 'Agent 任务已停止');
+    }
+  }
+  scheduleJobs();
+}
+
+function isAgentStopRequested(task) {
+  return Boolean(task.stopRequested);
+}
+
+class AgentStoppedError extends Error {
+  constructor() {
+    super('Agent 任务已停止');
+    this.name = 'AgentStoppedError';
+  }
+}
+
+function assertAgentRunning(task) {
+  if (isAgentStopRequested(task)) throw new AgentStoppedError();
+}
+
+async function recoverPersistedAgentTask() {
+  const task = await readAgentTask().catch(() => null);
+  if (!task || !['queued', 'running'].includes(task.status)) return;
+  agentTaskRuntime.set(task.agentTaskId, task);
+  addAgentLog(task, '检测到未完成的 Agent 任务，准备恢复');
+  await saveAgentTask(task);
+  void runAgentTask(task, { resume: true });
+}
+
+function createAgentCollectorSession(task) {
+  return {
+    id: crypto.randomUUID(),
+    status: 'running',
+    keywords: task.keywords,
+    platforms: task.platforms,
+    limitPerKeyword: task.limitPerKeyword,
+    retries: task.retries,
+    createdAt: Date.now(),
+    finishedAt: null,
+    items: [],
+    logs: [],
+    progress: {
+      done: 0,
+      total: task.keywords.length * task.platforms.length,
+      label: 'Agent 采集中',
+    },
+  };
+}
+
+function historyRecordFromJob(job) {
+  return {
+    jobId: job.id,
+    source: job.source,
+    originalName: job.originalName,
+    title: job.title || job.originalName,
+    sourceKeywords: job.sourceKeywords || [],
+    metrics: job.metrics || {},
+    transcript: job.transcript || '',
+    summary: job.summary || '',
+    durationMs: job.durationMs || 0,
+    createdAt: job.createdAt,
+    finishedAt: job.finishedAt,
+  };
+}
+
+async function runAgentTask(task, options = {}) {
+  try {
+    assertAgentRunning(task);
+    task.status = 'running';
+    task.startedAt = task.startedAt || Date.now();
+    if (options.resume) addAgentLog(task, `从阶段“${task.stage || '未知'}”恢复执行`);
+    await saveAgentTask(task);
+
+    let collectorSession = task.collectorSessionId
+      ? await readCollectorSession(task.collectorSessionId)
+      : null;
+    if (!collectorSession || collectorSession.status !== 'done') {
+      task.stage = 'collecting';
+      task.progress = '采集候选视频';
+      addAgentLog(task, `开始采集：${task.keywords.join('、')}`);
+      collectorSession = createAgentCollectorSession(task);
+      collectorSessions.set(collectorSession.id, collectorSession);
+      task.collectorSessionId = collectorSession.id;
+      await saveAgentTask(task);
+      await saveCollectorSession(collectorSession);
+      await runCollectorSession(collectorSession, {
+        limitPerKeyword: task.limitPerKeyword,
+        retries: task.retries,
+      });
+    }
+    if (collectorSession.status !== 'done') throw new Error(collectorSession.error || '候选采集失败');
+
+    if (!task.selectedItems?.length) {
+      task.candidateCount = collectorSession.items.length;
+      task.stage = 'filtering';
+      task.progress = '按条件筛选候选';
+      addAgentLog(task, `采集完成，共 ${task.candidateCount} 条候选`);
+      task.selectedItems = filterAgentItems(collectorSession.items, task.filters);
+      task.sourceLinks = task.selectedItems.map((item) => item.url).filter(Boolean);
+    }
+    if (!task.selectedItems.length) throw new Error('没有符合筛选条件的视频。');
+    assertAgentRunning(task);
+    if (task.stage === 'filtering') addAgentLog(task, `筛选完成，进入转写 ${task.selectedItems.length} 条`);
+    await saveAgentTask(task);
+
+    task.stage = 'transcribing';
+    const existingHistory = await readHistory();
+    const historyBySource = new Map(existingHistory.filter((record) => record.source).map((record) => [record.source, record]));
+    const completedBySource = new Map(
+      (task.sourceHistory || [])
+        .filter((record) => record.source && record.transcript)
+        .map((record) => [record.source, record]),
+    );
+    for (const item of task.selectedItems) {
+      const record = historyBySource.get(item.url);
+      if (record?.transcript && !completedBySource.has(item.url)) {
+        completedBySource.set(item.url, cloneHistoryRecord(record));
+      }
+    }
+    const completed = [];
+    const jobsToWait = [];
+    for (const item of task.selectedItems) {
+      const completedRecord = completedBySource.get(item.url);
+      if (completedRecord) {
+        completed.push(completedRecord);
+        addAgentLog(task, `转写成功（历史恢复）：${item.title || item.url}`);
+        continue;
+      }
+      const sourceKeywords = getCollectorItemKeywords(item);
+      const job = createJob({
+        type: 'agent',
+        agentTaskId: task.agentTaskId,
+        source: item.url,
+        originalName: item.title ? `${item.title} · ${item.author || ''}`.trim() : item.url,
+        sourceKeywords,
+      });
+      enqueueJob(job, () => processLinkJob(job, item.url, { sourceKeywords }));
+      jobsToWait.push({ item, job });
+    }
+    task.jobIds = jobsToWait.map(({ job }) => job.id);
+    task.sourceHistory = completed.map((record) => record);
+    task.progress = `转写已恢复，已完成 ${completed.length}/${task.selectedItems.length}`;
+    addAgentLog(task, `已恢复 ${completed.length} 条历史转写，待处理 ${jobsToWait.length} 条`);
+    await saveAgentTask(task);
+
+    const recoveredCount = completed.length;
+    for (let index = 0; index < jobsToWait.length; index += 1) {
+      assertAgentRunning(task);
+      const { item, job } = jobsToWait[index];
+      const currentIndex = Math.min(task.selectedItems.length, recoveredCount + index + 1);
+      task.progress = `转写 ${currentIndex}/${task.selectedItems.length}`;
+      addAgentLog(task, `等待转写：${item.title || item.url}`);
+      await saveAgentTask(task);
+      const finishedJob = await waitForJob(job.id);
+      assertAgentRunning(task);
+      if (finishedJob?.status === 'done') {
+        completed.push(historyRecordFromJob(finishedJob));
+        task.sourceHistory = completed;
+        addAgentLog(task, `转写成功（${completed.length}/${task.selectedItems.length}）：${item.title || item.url}`);
+        await saveAgentTask(task);
+      } else {
+        const reason = finishedJob?.error || `任务状态为 ${finishedJob?.status || '未知'}`;
+        addAgentLog(task, `转写失败：${item.title || item.url}；原因：${reason}`);
+      }
+    }
+    if (!completed.length) throw new Error('所有入选视频转写失败。');
+
+    assertAgentRunning(task);
+    task.sourceLinks = task.sourceHistory.map((record) => record.source).filter(Boolean);
+    task.stage = 'summarizing';
+    task.progress = '生成总结';
+    addAgentLog(task, `转写完成 ${completed.length}/${task.selectedItems.length} 条，开始生成总结`);
+    await saveAgentTask(task);
+    task.analysis = await analyzeHistoryRecords(task.purpose, task.sourceHistory, {
+      maxChars: getHistoryAnalysisMaxChars(),
+    });
+    await appendAnalysisHistory({
+      analysisId: crypto.randomUUID(),
+      agentTaskId: task.agentTaskId,
+      purpose: task.purpose,
+      analysis: task.analysis,
+      usedItems: task.sourceHistory.length,
+      sourceJobIds: task.sourceHistory.map((record) => record.jobId),
+      sourceHistory: task.sourceHistory,
+      createdAt: task.createdAt,
+      finishedAt: Date.now(),
+    });
+    task.status = 'done';
+    task.stage = 'completed';
+    task.progress = '完成';
+    task.finishedAt = Date.now();
+    addAgentLog(task, 'Agent 任务完成');
+    await saveAgentTask(task);
+  } catch (error) {
+    if (error instanceof AgentStoppedError || task.stopRequested) {
+      task.status = 'stopped';
+      task.stage = 'stopped';
+      task.progress = '已停止';
+      task.finishedAt = Date.now();
+      addAgentLog(task, 'Agent 任务已停止');
+      await saveAgentTask(task);
+      return;
+    }
+    task.status = 'failed';
+    task.stage = 'failed';
+    task.progress = '失败';
+    task.error = error instanceof Error ? error.message : String(error);
+    task.finishedAt = Date.now();
+    addAgentLog(task, `Agent 任务失败：${task.error}`);
+    await saveAgentTask(task);
+  } finally {
+    if (['done', 'failed', 'stopped'].includes(task.status)) {
+      agentTaskRuntime.delete(task.agentTaskId);
+    }
+  }
+}
+
 async function writeCollectorHistory(items) {
   const content = items.map((item) => JSON.stringify(item)).join('\n');
   await fsp.writeFile(collectorHistoryPath, content ? `${content}\n` : '', 'utf8');
@@ -1460,6 +2081,7 @@ function cloneHistoryRecord(record) {
     source: record.source,
     originalName: record.originalName,
     title: record.title,
+    sourceKeywords: record.sourceKeywords || [],
     metrics: record.metrics || {},
     transcript: record.transcript || '',
     summary: record.summary || '',
@@ -1800,7 +2422,7 @@ function updateJob(job, patch) {
   if (patch.status === 'running' && !job.startedAt) {
     patch.startedAt = Date.now();
   }
-  if (['done', 'failed'].includes(patch.status) && !patch.finishedAt) {
+  if (['done', 'failed', 'stopped'].includes(patch.status) && !patch.finishedAt) {
     patch.finishedAt = Date.now();
   }
   if (patch.finishedAt && job.startedAt) {
@@ -1834,6 +2456,15 @@ function failJob(job, error) {
   });
 }
 
+function stopJob(job, message = '任务已停止') {
+  updateJob(job, {
+    status: 'stopped',
+    progress: '已停止',
+    error: message,
+  });
+  addJobLog(job, message);
+}
+
 function runCommand(command, args, options = {}) {
   return new Promise((resolve, reject) => {
     if (options.job) addJobLog(options.job, `执行命令：${options.label || command}`);
@@ -1841,6 +2472,14 @@ function runCommand(command, args, options = {}) {
       env: { ...process.env, ...(options.env || {}) },
       cwd: options.cwd || rootDir,
     });
+    if (options.session) {
+      options.session.activeProcess = child;
+      if (options.session.stopRequested) child.kill('SIGTERM');
+    }
+    if (options.job) {
+      options.job.activeProcess = child;
+      if (options.job.cancelRequested) child.kill('SIGTERM');
+    }
     let stderr = '';
     let stdout = '';
     let timeoutId = null;
@@ -1865,6 +2504,8 @@ function runCommand(command, args, options = {}) {
     child.on('error', reject);
     child.on('close', (code) => {
       if (timeoutId) clearTimeout(timeoutId);
+      if (options.session) options.session.activeProcess = null;
+      if (options.job) options.job.activeProcess = null;
       const output = `${stdout}\n${stderr}`.trim();
       if (code === 0) {
         if (options.job) addJobLog(options.job, `命令完成：${options.label || command}`);
